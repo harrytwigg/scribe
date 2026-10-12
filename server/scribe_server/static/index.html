@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>scribe</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>scribe</h1>
+    <div id="status" class="status" aria-live="polite"></div>
+    <nav role="tablist">
+      <button role="tab" data-tab="models" aria-selected="true">Models</button>
+      <button role="tab" data-tab="live">Live</button>
+      <button role="tab" data-tab="history">History</button>
+      <button role="tab" data-tab="try">Try it</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="login" hidden>
+      <h2>Sign in</h2>
+      <p>Paste the scribe API token.</p>
+      <form id="login-form">
+        <input id="token" type="password" autocomplete="current-password" placeholder="API token" required>
+        <button type="submit">Sign in</button>
+      </form>
+      <p id="login-error" class="error"></p>
+    </section>
+
+    <section id="tab-models" class="tab">
+      <p class="hint">Download a model, then <strong>Use</strong> it. Everything transcribed from then on, including the Discord bot, uses the active model.</p>
+      <div id="models" class="cards"></div>
+    </section>
+
+    <section id="tab-live" class="tab" hidden>
+      <div id="live-sessions" class="chips"></div>
+      <div id="live-transcript" class="transcript"><p class="hint">No call is being transcribed. Start one with <code>/scribe join</code> in Discord.</p></div>
+    </section>
+
+    <section id="tab-history" class="tab" hidden>
+      <div class="split">
+        <ul id="history" class="list"></ul>
+        <div id="history-view" class="transcript"><p class="hint">Pick a session.</p></div>
+      </div>
+    </section>
+
+    <section id="tab-try" class="tab" hidden>
+      <p class="hint">Transcribe a clip with the active model. Swap models and run the same clip again to compare.</p>
+      <div class="row">
+        <label class="file">Audio file <input id="try-file" type="file" accept="audio/*,.wav,.flac,.ogg,.mp3"></label>
+        <button id="try-record" type="button">Record from mic</button>
+      </div>
+      <p id="try-mic-note" class="hint" hidden>The microphone needs HTTPS or localhost; upload a file instead.</p>
+      <div id="try-result" class="result"></div>
+    </section>
+  </main>
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

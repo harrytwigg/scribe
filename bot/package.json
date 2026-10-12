@@ -1,0 +1,29 @@
+{
+  "name": "scribe-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord voice transcription bot for scribe",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "test": "vitest run",
+    "e2e": "vitest run --config vitest.e2e.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@discordjs/voice": "0.19.2",
+    "@snazzah/davey": "0.1.12",
+    "discord.js": "^14.27.0",
+    "opusscript": "^0.1.1",
+    "prism-media": "^1.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
