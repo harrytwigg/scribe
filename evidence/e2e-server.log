@@ -1,55 +1,55 @@
-2026-10-12 23:21:24,131 INFO scribe: listening on 127.0.0.1 port 43811
-INFO:     Started server process [87825]
+2026-10-12 23:33:12,676 WARNING scribe.models: another scribe server uses /home/harry/.local/share/scribe/models; leaving partial downloads alone
+2026-10-12 23:33:12,911 INFO scribe: listening on 127.0.0.1 port 45951
+INFO:     Started server process [111456]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     127.0.0.1:59552 - "GET /api/whoami HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59558 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59558 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59558 - "POST /api/models/parakeet-tdt-0.6b-v2/activate HTTP/1.1" 202 Accepted
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-[0;93m2026-10-12 23:21:25.360578929 [W:onnxruntime:, transformer_memcpy.cc:111 ApplyImpl] 2 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider. It might have negative impact on performance (including unable to run CUDA graph). Set session_options.log_severity_level=1 to see the detail logs before this message.[m
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-2026-10-12 23:21:26,739 INFO scribe.models: loaded parakeet-tdt-0.6b-v2 in 2.1s
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59558 - "POST /api/sessions HTTP/1.1" 201 Created
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:43854 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "POST /api/sessions/1298d381cec5/utterances HTTP/1.1" 201 Created
-INFO:     127.0.0.1:59552 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:43854 - "POST /api/models/whisper-large-v3-turbo/activate HTTP/1.1" 202 Accepted
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-INFO:     127.0.0.1:59552 - "POST /api/sessions/1298d381cec5/utterances HTTP/1.1" 201 Created
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-2026-10-12 23:21:34,607 INFO scribe.models: loaded whisper-large-v3-turbo in 1.4s
-2026-10-12 23:21:34,607 INFO scribe.models: unloading parakeet-tdt-0.6b-v2
-INFO:     127.0.0.1:59552 - "GET /api/models HTTP/1.1" 200 OK
-2026-10-12 23:21:39,912 INFO faster_whisper: Processing audio with duration 00:12.092
-2026-10-12 23:21:39,950 INFO faster_whisper: VAD filter removed 00:00.000 of audio
-2026-10-12 23:21:40,272 INFO faster_whisper: Detected language 'en' with probability 1.00
-INFO:     127.0.0.1:43862 - "POST /api/sessions/1298d381cec5/utterances HTTP/1.1" 201 Created
-2026-10-12 23:21:41,172 INFO faster_whisper: Processing audio with duration 00:10.848
-2026-10-12 23:21:41,197 INFO faster_whisper: VAD filter removed 00:00.000 of audio
-2026-10-12 23:21:41,372 INFO faster_whisper: Detected language 'en' with probability 0.92
-INFO:     127.0.0.1:43862 - "POST /api/sessions/1298d381cec5/utterances HTTP/1.1" 201 Created
-2026-10-12 23:21:52,870 INFO faster_whisper: Processing audio with duration 00:24.624
-2026-10-12 23:21:52,926 INFO faster_whisper: VAD filter removed 00:00.000 of audio
-2026-10-12 23:21:53,111 INFO faster_whisper: Detected language 'en' with probability 1.00
-INFO:     127.0.0.1:43056 - "POST /api/sessions/1298d381cec5/utterances HTTP/1.1" 201 Created
-2026-10-12 23:21:55,322 INFO faster_whisper: Processing audio with duration 00:04.400
-2026-10-12 23:21:55,339 INFO faster_whisper: VAD filter removed 00:00.000 of audio
-2026-10-12 23:21:55,514 INFO faster_whisper: Detected language 'en' with probability 1.00
-INFO:     127.0.0.1:43056 - "POST /api/sessions/1298d381cec5/utterances HTTP/1.1" 201 Created
-INFO:     127.0.0.1:43060 - "POST /api/sessions/1298d381cec5/end HTTP/1.1" 200 OK
-INFO:     127.0.0.1:43056 - "GET /api/sessions/1298d381cec5 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:43060 - "GET /api/sessions/1298d381cec5/export?format=md HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/whoami HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50124 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50124 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50124 - "POST /api/models/parakeet-tdt-0.6b-v2/activate HTTP/1.1" 202 Accepted
+[0;93m2026-10-12 23:33:14.085057759 [W:onnxruntime:, transformer_memcpy.cc:111 ApplyImpl] 2 Memcpy nodes are added to the graph main_graph for CUDAExecutionProvider. It might have negative impact on performance (including unable to run CUDA graph). Set session_options.log_severity_level=1 to see the detail logs before this message.[m
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+2026-10-12 23:33:15,476 INFO scribe.models: loaded parakeet-tdt-0.6b-v2 in 2.1s
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50124 - "POST /api/sessions HTTP/1.1" 201 Created
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41328 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "POST /api/sessions/f1838ba632ce/utterances HTTP/1.1" 201 Created
+INFO:     127.0.0.1:50108 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41328 - "POST /api/models/whisper-large-v3-turbo/activate HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50108 - "POST /api/sessions/f1838ba632ce/utterances HTTP/1.1" 201 Created
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+2026-10-12 23:33:23,331 INFO scribe.models: loaded whisper-large-v3-turbo in 1.4s
+2026-10-12 23:33:23,332 INFO scribe.models: unloading parakeet-tdt-0.6b-v2
+INFO:     127.0.0.1:50108 - "GET /api/models HTTP/1.1" 200 OK
+2026-10-12 23:33:28,659 INFO faster_whisper: Processing audio with duration 00:12.092
+2026-10-12 23:33:28,692 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-10-12 23:33:29,018 INFO faster_whisper: Detected language 'en' with probability 1.00
+INFO:     127.0.0.1:41330 - "POST /api/sessions/f1838ba632ce/utterances HTTP/1.1" 201 Created
+2026-10-12 23:33:29,914 INFO faster_whisper: Processing audio with duration 00:10.848
+2026-10-12 23:33:29,939 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-10-12 23:33:30,117 INFO faster_whisper: Detected language 'en' with probability 0.92
+INFO:     127.0.0.1:41330 - "POST /api/sessions/f1838ba632ce/utterances HTTP/1.1" 201 Created
+2026-10-12 23:33:41,607 INFO faster_whisper: Processing audio with duration 00:24.624
+2026-10-12 23:33:41,667 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-10-12 23:33:41,852 INFO faster_whisper: Detected language 'en' with probability 1.00
+INFO:     127.0.0.1:50368 - "POST /api/sessions/f1838ba632ce/utterances HTTP/1.1" 201 Created
+2026-10-12 23:33:44,064 INFO faster_whisper: Processing audio with duration 00:04.400
+2026-10-12 23:33:44,082 INFO faster_whisper: VAD filter removed 00:00.000 of audio
+2026-10-12 23:33:44,253 INFO faster_whisper: Detected language 'en' with probability 1.00
+INFO:     127.0.0.1:50368 - "POST /api/sessions/f1838ba632ce/utterances HTTP/1.1" 201 Created
+INFO:     127.0.0.1:50382 - "POST /api/sessions/f1838ba632ce/end HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50368 - "GET /api/sessions/f1838ba632ce HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50382 - "GET /api/sessions/f1838ba632ce/export?format=md HTTP/1.1" 200 OK
