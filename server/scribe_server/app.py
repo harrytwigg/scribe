@@ -11,10 +11,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
 from . import exports
-from .audio import RATE, AudioError, Vad, decode, speech_chunks, wav_bytes
+from .audio import RATE, AudioError, Vad, decode, speech_chunks
 from .auth import COOKIE, Auth
 from .models import Conflict, ModelManager, NoActiveModel, NotFound
 from .store import Store
@@ -32,6 +33,11 @@ class Services:
     vad: Vad
     auth: Auth
     audio_dir: Path | None = None
+    # Host headers the server answers to; None skips the check (tests). Stops DNS rebinding.
+    allowed_hosts: list[str] | None = None
+    max_upload_bytes: int = 512 * 1024 * 1024
+    # Holds the number of open sessions, for the host's idle check to read without a token.
+    open_sessions_file: Path | None = None
 
 
 @dataclass
@@ -57,6 +63,9 @@ class Hub:
         self._listeners[session_id].discard(queue)
 
     def publish(self, session_id: str, event: str, data: dict) -> None:
+        # asyncio queues are not thread-safe: publish only from `async def` handlers. This raises
+        # RuntimeError when called from a threadpool (a plain `def` handler).
+        asyncio.get_running_loop()
         for queue in list(self._listeners.get(session_id, ())):
             try:
                 queue.put_nowait((event, data))
@@ -92,9 +101,19 @@ def create_app(services: Services) -> FastAPI:
     app = FastAPI(title="scribe", docs_url=None, redoc_url=None)
     hub = Hub()
     s = services
+    if s.allowed_hosts is not None:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=s.allowed_hosts)
 
     def guard(request: Request) -> None:
         s.auth.guard(request)
+
+    def write_open_sessions() -> None:
+        if s.open_sessions_file:
+            tmp = s.open_sessions_file.with_suffix(".tmp")
+            tmp.write_text(f"{s.store.count_open_sessions()}\n")
+            tmp.replace(s.open_sessions_file)
+
+    write_open_sessions()
 
     def run_asr(audio) -> Transcript:
         """Runs on the GPU worker thread."""
@@ -109,6 +128,11 @@ def create_app(services: Services) -> FastAPI:
             s.models.release(model)
         return Transcript(text.strip(), model.id, int((time.monotonic() - started) * 1000), len(audio) / RATE)
 
+    async def read_upload(file: UploadFile) -> bytes:
+        if file.size is not None and file.size > s.max_upload_bytes:
+            raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
+        return await file.read()
+
     async def transcribe(data: bytes, model: str | None = None) -> Transcript:
         if model and model != s.models.active_id:
             raise HTTPException(
@@ -117,7 +141,8 @@ def create_app(services: Services) -> FastAPI:
         if s.models.active_id is None:
             raise HTTPException(503, "no model is active; pick one in the GUI")
         try:
-            audio = decode(data)
+            # Off the event loop: decoding a long upload must not stall live streams.
+            audio = await asyncio.to_thread(decode, data)
         except AudioError as error:
             raise HTTPException(400, str(error)) from error
         try:
@@ -152,12 +177,11 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/api/status", dependencies=[Depends(guard)])
     def status() -> dict:
-        open_sessions = [x for x in s.store.list_sessions(500) if x["ended_at"] is None]
         return {
             "active_model": s.models.active_id,
             "loading_model": s.models.loading_id,
             "queue_depth": s.worker.depth,
-            "open_sessions": len(open_sessions),
+            "open_sessions": s.store.count_open_sessions(),
         }
 
     @app.get("/api/models", dependencies=[Depends(guard)])
@@ -195,7 +219,7 @@ def create_app(services: Services) -> FastAPI:
         model: str | None = Form(None),
         response_format: str = Form("json"),
     ):
-        result = await transcribe(await file.read(), model)
+        result = await transcribe(await read_upload(file), model)
         if response_format == "text":
             return PlainTextResponse(result.text)
         if response_format == "verbose_json":
@@ -218,7 +242,9 @@ def create_app(services: Services) -> FastAPI:
     @app.post("/api/sessions", dependencies=[Depends(guard)], status_code=201)
     def create_session(body: NewSession) -> dict:
         title = body.title or time.strftime("%Y-%m-%d %H:%M ") + body.source
-        return s.store.create_session(body.source, title, body.guild, body.channel)
+        session = s.store.create_session(body.source, title, body.guild, body.channel)
+        write_open_sessions()
+        return session
 
     @app.get("/api/sessions", dependencies=[Depends(guard)])
     def list_sessions() -> list[dict]:
@@ -229,9 +255,10 @@ def create_app(services: Services) -> FastAPI:
         return {**session_or_404(session_id), "utterances": s.store.utterances(session_id)}
 
     @app.post("/api/sessions/{session_id}/end", dependencies=[Depends(guard)])
-    def end_session(session_id: str) -> dict:
+    async def end_session(session_id: str) -> dict:  # async: publish on the event loop
         session_or_404(session_id)
         s.store.end_session(session_id)
+        write_open_sessions()
         session = s.store.get_session(session_id)
         hub.publish(session_id, "end", session)
         return session
@@ -240,6 +267,7 @@ def create_app(services: Services) -> FastAPI:
     def delete_session(session_id: str) -> dict:
         session_or_404(session_id)
         s.store.delete_session(session_id)
+        write_open_sessions()
         if s.audio_dir:
             for path in (s.audio_dir / session_id).glob("*.wav"):
                 path.unlink()
@@ -252,30 +280,35 @@ def create_app(services: Services) -> FastAPI:
         speaker_id: str = Form(...),
         speaker_name: str = Form(...),
         started_at: float = Form(...),
+        client_key: str | None = Form(None),
     ) -> dict:
+        """`client_key` makes a retry safe: a key already stored returns the stored line."""
         session = session_or_404(session_id)
         if session["ended_at"] is not None:
             raise HTTPException(409, "session has ended")
-        data = await file.read()
+        if existing := s.store.utterance_by_key(session_id, client_key):
+            return existing
+        data = await read_upload(file)
         result = await transcribe(data)
         if not result.text:
             return {"skipped": True, "reason": "no speech", "duration_s": result.duration_s}
-        line = s.store.add_utterance(
+        line, new = s.store.add_utterance(
             session_id, speaker_id, speaker_name, started_at, int(result.duration_s * 1000),
-            result.text, result.model_id, result.asr_ms,
+            result.text, result.model_id, result.asr_ms, client_key,
         )
-        if s.audio_dir:
-            folder = s.audio_dir / session_id
-            folder.mkdir(parents=True, exist_ok=True)
-            (folder / f"{line['id']}.wav").write_bytes(wav_bytes(decode(data)))
-        hub.publish(session_id, "line", line)
+        if new:
+            if s.audio_dir:
+                folder = s.audio_dir / session_id
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / f"{line['id']}.wav").write_bytes(data)
+            hub.publish(session_id, "line", line)
         return line
 
     @app.post("/api/sessions/{session_id}/markers", dependencies=[Depends(guard)], status_code=201)
-    def add_marker(session_id: str, body: Marker) -> dict:
+    async def add_marker(session_id: str, body: Marker) -> dict:  # async: publish on the event loop
         """A line with no audio behind it, e.g. the bot recording audio it could not deliver."""
         session_or_404(session_id)
-        line = s.store.add_utterance(session_id, body.speaker_id, body.speaker_name, body.started_at, 0, body.text, None, None)
+        line, _ = s.store.add_utterance(session_id, body.speaker_id, body.speaker_name, body.started_at, 0, body.text, None, None)
         hub.publish(session_id, "line", line)
         return line
 

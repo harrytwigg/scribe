@@ -78,3 +78,53 @@ describe('ScribeClient.postUtterance', () => {
     expect(calls).toBe(1)
   })
 })
+
+describe('ScribeClient.postUtterance with an opt-out', () => {
+  it('posts nothing when the speaker is not allowed', async () => {
+    let calls = 0
+    const url = await serve((_req, res) => {
+      calls++
+      res.writeHead(201, { 'Content-Type': 'application/json' }).end('{"text":"x"}')
+    })
+    const result = await new ScribeClient(url).postUtterance('s1', speaker, pcm, 1, () => false)
+    expect(result).toEqual({ ok: true, skipped: true })
+    expect(calls).toBe(0)
+  })
+
+  it('stops retrying, and records no marker, once the speaker opts out', async () => {
+    const paths: string[] = []
+    let allowed = true
+    const url = await serve((req, res) => {
+      paths.push(req.url!)
+      allowed = false // the user opts out while the first attempt is failing
+      res.writeHead(503, { 'Content-Type': 'application/json' }).end('{"detail":"queue full"}')
+    })
+    const result = await new ScribeClient(url, undefined, { retryDelaysMs: [5, 5] }).postUtterance('s1', speaker, pcm, 1, () => allowed)
+    expect(result.skipped).toBe(true)
+    expect(paths).toEqual(['/api/sessions/s1/utterances'])
+  })
+
+  it('sends the same idempotency key on every retry', async () => {
+    const keys: string[] = []
+    let calls = 0
+    const url = await serve((_req, res, body) => {
+      keys.push(/name="client_key"\r\n\r\n([^\r]*)/.exec(body)![1])
+      if (++calls < 3) res.writeHead(503, { 'Content-Type': 'application/json' }).end('{}')
+      else res.writeHead(201, { 'Content-Type': 'application/json' }).end('{"text":"ok"}')
+    })
+    await new ScribeClient(url, undefined, { retryDelaysMs: [5, 5] }).postUtterance('s1', speaker, pcm, 42.5)
+    expect(keys).toEqual(['u1:42.5', 'u1:42.5', 'u1:42.5'])
+  })
+
+  it('retries a timeout, with the same key', async () => {
+    const keys: string[] = []
+    const url = await serve((_req, res, body) => {
+      keys.push(/name="client_key"\r\n\r\n([^\r]*)/.exec(body)![1])
+      if (keys.length === 1) setTimeout(() => res.writeHead(201).end('{}'), 300) // too slow
+      else res.writeHead(201, { 'Content-Type': 'application/json' }).end('{"text":"ok"}')
+    })
+    const result = await new ScribeClient(url, undefined, { retryDelaysMs: [5], timeoutMs: 100 }).postUtterance('s1', speaker, pcm, 7)
+    expect(result.text).toBe('ok')
+    expect(new Set(keys)).toEqual(new Set(['u1:7']))
+  })
+})

@@ -18,7 +18,7 @@ const log = (...args: unknown[]) => console.log(new Date().toISOString(), ...arg
 const redact = (m: string) =>
   m
     .replace(/"(secret_key|secretKey)":(\[[^\]]*\]|\{[^}]*\})/g, '"$1":"[redacted]"')
-    .replace(/"(token|session_id|sessionId)":"[^"]*"/g, '"$1":"[redacted]"')
+    .replace(/"(token|session_id|sessionId|address)":"[^"]*"/g, '"$1":"[redacted]"')
 
 client.once(Events.ClientReady, async (ready) => {
   log(`logged in as ${ready.user.tag}`)

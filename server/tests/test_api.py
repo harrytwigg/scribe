@@ -8,11 +8,14 @@ from .conftest import TOKEN, silence, tone, wav
 REMOTE = {"X-Forwarded-For": "100.64.0.9"}
 
 
-def post_utterance(client, session_id, audio, speaker="u1", name="Ada", headers=None):
+def post_utterance(client, session_id, audio, speaker="u1", name="Ada", headers=None, key=None):
+    data = {"speaker_id": speaker, "speaker_name": name, "started_at": str(time.time())}
+    if key:
+        data["client_key"] = key
     return client.post(
         f"/api/sessions/{session_id}/utterances",
         files={"file": ("u.wav", wav(audio), "audio/wav")},
-        data={"speaker_id": speaker, "speaker_name": name, "started_at": str(time.time())},
+        data=data,
         headers=headers or {},
     )
 
@@ -230,9 +233,10 @@ def test_live_events_stream(harness):
         def listen():
             with httpx.stream("GET", f"{base}/api/sessions/{sid}/events", timeout=10, headers=auth) as response:
                 for raw in response.iter_lines():
-                    if raw.startswith("data:"):
-                        received.append(raw)
-                        return
+                    if raw.startswith("event:"):
+                        received.append((time.monotonic(), raw[6:].strip()))
+                        if raw.endswith("end"):
+                            return
 
         listener = threading.Thread(target=listen, daemon=True)
         listener.start()
@@ -244,8 +248,105 @@ def test_live_events_stream(harness):
             headers=auth,
         )
         assert r.status_code == 201, r.text
+        # Both of these are published from handlers that must run on the event loop.
+        httpx.post(f"{base}/api/sessions/{sid}/markers", headers=auth,
+                   json={"speaker_id": "u1", "speaker_name": "Ada", "started_at": time.time(), "text": "[gap]"})
+        ended = time.monotonic()
+        httpx.post(f"{base}/api/sessions/{sid}/end", headers=auth)
         listener.join(5)
-        assert received and '"speaker_name": "Ada"' in received[0]
+        assert [name for _, name in received] == ["line", "line", "end"]
+        assert received[-1][0] - ended < 1.0, "the end event arrived late"
     finally:
         server.should_exit = True
         thread.join(5)
+
+
+def test_retried_utterance_is_stored_once(harness):
+    harness.ready("alpha")
+    c = harness.client
+    sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]
+    first = post_utterance(c, sid, tone(2), key="u1:100.0").json()
+    calls = harness.loader.engines["alpha"].calls
+    second = post_utterance(c, sid, tone(2), key="u1:100.0").json()
+    assert second["id"] == first["id"]
+    assert harness.loader.engines["alpha"].calls == calls, "a stored key must not be transcribed again"
+    post_utterance(c, sid, tone(2), key="u1:105.0")
+    assert len(c.get(f"/api/sessions/{sid}").json()["utterances"]) == 2
+
+
+def test_concurrent_duplicate_is_stored_once(harness):
+    """The retry arrives while the first attempt is still on the GPU: both run, one row is kept."""
+    harness.ready("alpha")
+    harness.loader.engines["alpha"].delay = 0.3
+    c = harness.client
+    sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(post_utterance(c, sid, tone(1), key="k").json())) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results[0]["id"] == results[1]["id"]
+    assert len(c.get(f"/api/sessions/{sid}").json()["utterances"]) == 1
+
+
+def test_upload_size_cap(harness):
+    harness.ready("alpha")
+    harness.services.max_upload_bytes = 1000
+    r = harness.client.post("/v1/audio/transcriptions", files={"file": ("a.wav", wav(tone(1)), "audio/wav")})
+    assert r.status_code == 413
+
+
+def test_unknown_host_refused(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from scribe_server.app import create_app
+
+    from .conftest import Harness
+
+    h = Harness(tmp_path)
+    h.services.allowed_hosts = ["127.0.0.1", "harry-box", "*.ts.net"]
+    c = TestClient(create_app(h.services), headers={"Authorization": f"Bearer {TOKEN}"})
+    assert c.get("/api/models", headers={"Host": "attacker.example"}).status_code == 400
+    assert c.get("/api/models", headers={"Host": "harry-box:8787"}).status_code == 200
+    assert c.get("/api/models", headers={"Host": "harry-box.tail1234.ts.net"}).status_code == 200
+    h.worker.stop()
+
+
+def test_store_migrates_old_database(tmp_path):
+    import sqlite3
+
+    from scribe_server.store import Store
+
+    db = sqlite3.connect(tmp_path / "old.db")
+    db.executescript(
+        "create table sessions (id text primary key, source text not null, title text not null, guild text, "
+        "channel text, started_at real not null, ended_at real);"
+        "create table utterances (id integer primary key autoincrement, session_id text not null, speaker_id text not null, "
+        "speaker_name text not null, started_at real not null, duration_ms integer not null, text text not null, "
+        "model_id text, asr_ms integer);"
+        "insert into sessions values ('s', 'discord', 't', null, null, 1, null);"
+        "insert into utterances (session_id, speaker_id, speaker_name, started_at, duration_ms, text) values ('s', 'u', 'U', 1, 1, 'old');"
+    )
+    db.commit()
+    db.close()
+    store = Store(tmp_path / "old.db")
+    assert store.utterances("s")[0]["text"] == "old"
+    _, new = store.add_utterance("s", "u", "U", 2, 1, "new", None, None, "k")
+    assert new
+    _, again = store.add_utterance("s", "u", "U", 2, 1, "new", None, None, "k")
+    assert not again
+
+
+def test_open_sessions_file(harness, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from scribe_server.app import create_app
+
+    harness.services.open_sessions_file = tmp_path / "open-sessions"
+    c = TestClient(create_app(harness.services), headers={"Authorization": f"Bearer {TOKEN}"})
+    assert harness.services.open_sessions_file.read_text() == "0\n"
+    sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]
+    assert harness.services.open_sessions_file.read_text() == "1\n"
+    c.post(f"/api/sessions/{sid}/end")
+    assert harness.services.open_sessions_file.read_text() == "0\n"

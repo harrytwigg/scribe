@@ -35,6 +35,7 @@ class Settings:
     default_model: str
     queue_depth: int
     trust_localhost: bool = False
+    allowed_hosts: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,7 +51,17 @@ class Settings:
             default_model=os.environ.get("SCRIBE_DEFAULT_MODEL", "parakeet-tdt-0.6b-v2"),
             queue_depth=int(os.environ.get("SCRIBE_QUEUE_DEPTH", "32")),
             trust_localhost=_flag("SCRIBE_TRUST_LOCALHOST"),
+            allowed_hosts=tuple(h.strip() for h in os.environ.get("SCRIBE_ALLOWED_HOSTS", "").split(",") if h.strip()),
         )
+
+    def host_allowlist(self) -> list[str]:
+        """Host headers to answer: the listen addresses, this machine's names, tailnet names, and
+        SCRIBE_ALLOWED_HOSTS (e.g. a public domain behind a proxy). Anything else is refused,
+        which stops a DNS-rebinding page from reaching the server."""
+        import socket
+
+        name = socket.gethostname()
+        return sorted({*self.hosts, "localhost", "127.0.0.1", "::1", name, f"{name}.local", "*.ts.net", *self.allowed_hosts})
 
     def check(self) -> None:
         """Refuse to listen beyond loopback without a token (docs/spec.md, 3.7)."""

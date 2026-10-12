@@ -98,7 +98,6 @@ function alertInline(message) {
 }
 
 function modelCard(m) {
-  const busy = m.loading || m.status === 'downloading';
   const actions = [];
   if (m.status === 'not_downloaded') actions.push(el('button', { class: 'primary', onclick: () => modelAction('POST', `/api/models/${m.id}/download`, 'Download') }, `Download (${formatSize(m.size_mb)})`));
   if (m.status === 'downloading') actions.push(el('button', { onclick: () => modelAction('DELETE', `/api/models/${m.id}`, 'Cancel') }, 'Cancel'));
@@ -140,6 +139,7 @@ const lineNode = (session, u) => el('div', { class: 'line' },
 
 let liveSource = null;
 let liveSession = null;
+let liveOpening = 0;
 async function refreshLive() {
   if (currentTab !== 'live') return;
   const sessions = (await api('/api/sessions')).filter((s) => s.ended_at == null);
@@ -149,7 +149,11 @@ async function refreshLive() {
 
 async function openLive(id) {
   liveSource?.close();
+  liveSource = null;
+  // A newer openLive may start while this one awaits; only the latest may attach a stream.
+  const opening = ++liveOpening;
   const session = await api(`/api/sessions/${id}`);
+  if (opening !== liveOpening) return;
   liveSession = session;
   const box = $('#live-transcript');
   box.replaceChildren(...session.utterances.map((u) => lineNode(session, u)));

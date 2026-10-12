@@ -28,7 +28,7 @@ const RETRYABLE = new Set([502, 503, 504])
 export class ScribeClient {
   constructor(
     private readonly baseUrl: string,
-    private readonly token: string | undefined,
+    private readonly token?: string,
     private readonly options: { retryDelaysMs?: number[]; timeoutMs?: number } = {},
   ) {}
 
@@ -86,17 +86,30 @@ export class ScribeClient {
   /**
    * Post one utterance. A busy or unreachable server is retried (1 s, 3 s); if it still fails,
    * a marker line records the gap instead, so the call is never blocked (docs/spec.md, 3.2).
+   *
+   * Every attempt carries the same key, so a retry after a timeout (when the first attempt may
+   * still have been stored) cannot store the line twice. `allowed` is asked before every attempt:
+   * a speaker who opts out meanwhile is never posted.
    */
-  async postUtterance(sessionId: string, speaker: Speaker, pcm: Buffer, startedAt: number): Promise<PostResult> {
+  async postUtterance(
+    sessionId: string,
+    speaker: Speaker,
+    pcm: Buffer,
+    startedAt: number,
+    allowed: () => boolean = () => true,
+  ): Promise<PostResult> {
     const delays = this.options.retryDelaysMs ?? [1000, 3000]
+    const key = `${speaker.id}:${startedAt}`
     let lastError = ''
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delays[attempt - 1]))
+      if (!allowed()) return { ok: true, skipped: true }
       const form = new FormData()
       form.append('file', new Blob([new Uint8Array(wav(pcm))], { type: 'audio/wav' }), 'utterance.wav')
       form.append('speaker_id', speaker.id)
       form.append('speaker_name', speaker.name)
       form.append('started_at', String(startedAt))
+      form.append('client_key', key)
       try {
         const result = await this.request<{ text?: string; skipped?: boolean }>(
           'POST',
@@ -110,6 +123,7 @@ export class ScribeClient {
         if (!retryable) return { ok: false, error: lastError }
       }
     }
+    if (!allowed()) return { ok: true, skipped: true }
     const seconds = Math.round(durationMs(pcm) / 1000)
     await this.postMarker(sessionId, speaker, startedAt, `[unavailable: ${seconds} s of audio from ${speaker.name}]`).catch(
       () => {},

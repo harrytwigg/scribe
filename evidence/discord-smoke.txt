@@ -4,7 +4,7 @@
 2026-10-12T22:18:06.517Z [voice] [NW] [WS] >> {"op":0,"d":{"server_id":"1551668459429953637","user_id":"1531290649314463824","session_id":"[redacted]","token":"[redacted]","max_dave_protocol_version":1}}
 2026-10-12T22:18:06.518Z [state] connecting -> connecting
 2026-10-12T22:18:06.534Z [state] connecting -> connecting
-2026-10-12T22:18:06.551Z [voice] [NW] [WS] >> {"op":1,"d":{"protocol":"udp","data":{"address":"90.208.56.36","port":54933,"mode":"aead_aes256_gcm_rtpsize"}}}
+2026-10-12T22:18:06.551Z [voice] [NW] [WS] >> {"op":1,"d":{"protocol":"udp","data":{"address":"[redacted]","port":54933,"mode":"aead_aes256_gcm_rtpsize"}}}
 2026-10-12T22:18:06.551Z [state] connecting -> connecting
 2026-10-12T22:18:06.567Z [voice] [NW] [WS] << {"op":4,"d":{"video_codec":"H264","secure_frames_version":1,"secret_key":"[redacted]","mode":"aead_aes256_gcm_rtpsize","media_session_id":"d58eae9ff77c4d9c22dfe4eeb9848fa8","dave_protocol_version":1,"audio_codec":"opus"}}
 2026-10-12T22:18:06.568Z [voice] [NW] [DAVE] Session initialized for protocol version 1

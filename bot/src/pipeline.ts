@@ -37,7 +37,7 @@ export class Pipeline {
     const segmenter = new Segmenter((utterance) => {
       const job = speakerPromise
         .then((speaker) =>
-          client.postUtterance(sessionId, speaker, utterance.pcm, utterance.startedAt).then((result) => {
+          client.postUtterance(sessionId, speaker, utterance.pcm, utterance.startedAt, () => !isOptedOut(userId)).then((result) => {
             if (result.ok && result.text) onLine?.(speaker, result.text)
             if (!result.ok) onError?.(new Error(`utterance from ${speaker.name} lost: ${result.error}`))
           }),
@@ -83,9 +83,5 @@ export class Pipeline {
       opus.destroy()
     }
     while (this.pending.size) await Promise.allSettled([...this.pending])
-  }
-
-  get speaking(): number {
-    return this.active.size
   }
 }

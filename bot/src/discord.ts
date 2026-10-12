@@ -63,7 +63,11 @@ export const commands = new SlashCommandBuilder()
 export class ScribeBot {
   readonly client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] })
   private readonly calls = new Map<string, Call>()
+  /** Guilds with a join in progress: claimed before the first await, so two joins cannot race. */
+  private readonly joining = new Set<string>()
   private optedOut = new Set<string>()
+  /** Opt-outs/ins the server has not saved yet; re-sent and re-applied on every refresh. */
+  private readonly unsaved = new Map<string, boolean>()
 
   constructor(
     private readonly config: Config,
@@ -88,11 +92,7 @@ export class ScribeBot {
 
   private async onReady(tag: string) {
     this.log(`logged in as ${tag}`)
-    try {
-      this.optedOut = await this.server.optouts()
-    } catch (error) {
-      this.log('could not load opt-outs from the server', error)
-    }
+    await this.refreshOptouts().catch((error) => this.log('could not load opt-outs from the server', error))
     const body = [commands.toJSON()]
     if (this.config.guildId) await this.client.application!.commands.set(body, this.config.guildId)
     else await this.client.application!.commands.set(body)
@@ -108,13 +108,23 @@ export class ScribeBot {
     const userId = interaction.user.id
     if (sub === 'optout' || sub === 'optin') {
       const out = sub === 'optout'
-      await this.server.setOptout(userId, out)
+      // Locally first, so nothing more is posted even if the server cannot be reached.
       if (out) {
         this.optedOut.add(userId)
         for (const call of this.calls.values()) call.pipeline.drop(userId)
       } else this.optedOut.delete(userId)
+      let saved = true
+      this.unsaved.set(userId, out)
+      await this.server
+        .setOptout(userId, out)
+        .then(() => this.unsaved.delete(userId))
+        .catch((error) => {
+          saved = false
+          this.log('could not save opt-out', error)
+        })
+      const done = out ? 'You will not be transcribed.' : 'You can be transcribed again.'
       await interaction.reply({
-        content: out ? 'You will not be transcribed.' : 'You can be transcribed again.',
+        content: saved ? done : `${done} (Only until the bot restarts: the scribe server could not save it. Try again later.)`,
         flags: MessageFlags.Ephemeral,
       })
       return
@@ -153,10 +163,21 @@ export class ScribeBot {
       await interaction.reply({ content: 'Join a voice channel first.', flags: MessageFlags.Ephemeral })
       return
     }
-    if (this.calls.has(interaction.guildId)) {
-      await interaction.reply({ content: `Already transcribing ${this.calls.get(interaction.guildId)!.channel}.`, flags: MessageFlags.Ephemeral })
+    const guildId = interaction.guildId
+    if (this.calls.has(guildId) || this.joining.has(guildId)) {
+      const where = this.calls.get(guildId)?.channel
+      await interaction.reply({ content: where ? `Already transcribing ${where}.` : 'Already starting.', flags: MessageFlags.Ephemeral })
       return
     }
+    this.joining.add(guildId)
+    try {
+      await this.startCall(interaction, channel)
+    } finally {
+      this.joining.delete(guildId)
+    }
+  }
+
+  private async startCall(interaction: ChatInputCommandInteraction<'cached'>, channel: VoiceBasedChannel) {
     await interaction.deferReply()
     const status = await this.server.status().catch(() => null)
     if (!status) {
@@ -169,7 +190,7 @@ export class ScribeBot {
     }
     // Opt-outs live on the server; never start a call without the current list.
     try {
-      this.optedOut = await this.server.optouts()
+      await this.refreshOptouts()
     } catch {
       await interaction.editReply('Could not load opt-outs from the scribe server, so not starting.')
       return
@@ -182,6 +203,19 @@ export class ScribeBot {
       return
     }
     await interaction.editReply(`Transcribing ${channel} with ${status.active_model}.`)
+  }
+
+  /** Load opt-outs from the server, keeping (and re-sending) any it has not saved yet. */
+  async refreshOptouts(): Promise<void> {
+    for (const [userId, out] of this.unsaved) {
+      await this.server.setOptout(userId, out).then(() => this.unsaved.delete(userId)).catch(() => {})
+    }
+    const fresh = await this.server.optouts()
+    for (const [userId, out] of this.unsaved) {
+      if (out) fresh.add(userId)
+      else fresh.delete(userId)
+    }
+    this.optedOut = fresh
   }
 
   private async join(channel: VoiceBasedChannel) {

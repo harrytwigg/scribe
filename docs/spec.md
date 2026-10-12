@@ -171,6 +171,9 @@ Per-user streams give speaker attribution for free; no diarization is needed on 
   Each job holds a reference to the model it started with, and the old model is unloaded only when
   its in-flight count drains to zero. Nothing is dropped mid-swap. The active choice persists
   across restarts.
+- **Idempotency**: the bot sends a `client_key` per utterance (speaker id and start time); a key
+  already stored returns the stored line, and two attempts racing on the GPU still store one row
+  (a unique index), so retrying after a timeout cannot duplicate a line.
 - **Rules**: activate requires the model to be downloaded (409 otherwise, including mid-download);
   DELETE of the active model is refused (409); DELETE mid-download cancels the download and removes
   the partial directory. `model=<id>` on `/v1/audio/transcriptions` must be the active model or be
@@ -272,7 +275,7 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 | Phase | Scope | Needs Harry |
 | --- | --- | --- |
 | 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on harry-box. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | Done |
-| 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on harry-box. Then a soak test, and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call |
+| 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on harry-box. Then a soak test; a dedicated Discord application (H1); and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call; the application (H1) |
 | 2 | Public ingress via the tools host + tailnet policy | H3 |
 | 3 | Chrome extension for Meet / any browser call | No on the tailnet; H3 if off it |
 | 4 | Diarization for single-stream sources, LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
@@ -300,12 +303,16 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 
 ## 9. Decisions
 
-Harry asked for the build to go ahead without further questions (2026-10-12), so the recommended
-option was taken for each. Any can be revisited.
+Harry asked for the build to go ahead without further questions (2026-10-12). The recommended
+option was taken for H2 to H5. **H1 deviates from its recommendation**, because the recommended
+option needs Harry's own hands. Any can be revisited.
 
-- **H1 Bot identity: reuse the existing bot application** ("Longbow Dev", user "Harry test"), whose
-  token is already in the instance's secrets file (`DISCORD_BOT_TOKEN`). The bot reads it under
-  `SCRIBE_DISCORD_TOKEN_KEY`, so moving to a dedicated application later is a config change.
+- **H1 Bot identity: the existing bot application, for now** ("Longbow Dev", user "Harry test"),
+  whose token is already in the instance's secrets file (`DISCORD_BOT_TOKEN`). A dedicated
+  application (the recommendation) has to be created in Harry's Discord Developer Portal, which an
+  agent cannot do. The existing application also holds the Message Content Intent, which scribe
+  does not need. The bot reads its token under `SCRIBE_DISCORD_TOKEN_KEY`, so moving to a dedicated
+  application is a config change (phase 1).
 - **H2 Where: the Longbow server**, slash commands registered there only (`SCRIBE_GUILD_ID`). The
   notice, nickname and `/scribe optout` are the consent mechanism; transcripts are not echoed into
   Discord (`SCRIBE_ECHO` off).

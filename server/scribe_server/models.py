@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from .catalogue import CatalogueEntry, by_id
@@ -47,11 +47,6 @@ class Download:
     total: int = 0
     cancelled: bool = False
     thread: threading.Thread | None = None
-
-
-@dataclass
-class DownloadState:
-    error: str | None = None
 
 
 # (entry, destination) -> None; raises on failure. Replaceable in tests.

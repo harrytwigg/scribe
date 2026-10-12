@@ -19,7 +19,11 @@ function tone(ms: number, hz: number) {
 
 class RecordingClient {
   posts: { speaker: Speaker; ms: number; startedAt: number }[] = []
-  async postUtterance(_session: string, speaker: Speaker, pcm: Buffer, startedAt: number) {
+  /** Holds every post until opened, like a retry waiting out its delay. */
+  gate: Promise<void> = Promise.resolve()
+  async postUtterance(_session: string, speaker: Speaker, pcm: Buffer, startedAt: number, allowed = () => true) {
+    await this.gate
+    if (!allowed()) return { ok: true, skipped: true }
     this.posts.push({ speaker, ms: durationMs(pcm), startedAt })
     return { ok: true, text: `${speaker.name} said something` }
   }
@@ -71,5 +75,31 @@ describe('Pipeline with a replayed call', () => {
     expect(client.posts).toHaveLength(1)
     expect(client.posts[0].ms).toBeGreaterThan(1000)
     expect(client.posts[0].ms).toBeLessThan(2000)
+  })
+})
+
+describe('Pipeline opt-out', () => {
+  it('never posts speech already cut when the speaker opts out', async () => {
+    // 30 s turn: the first 25 s is cut and queued while the speaker is still talking.
+    const source = new ReplaySource([{ userId: 'a', pcm: tone(30_000, 300), atMs: 0 }], 50)
+    const client = new RecordingClient()
+    let open!: () => void
+    client.gate = new Promise((resolve) => (open = resolve))
+    const optedOut = new Set<string>()
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: (id) => optedOut.has(id),
+    })
+    const playing = source.play()
+    await new Promise((resolve) => setTimeout(resolve, 650)) // past the 25 s cut at 50x
+    optedOut.add('a')
+    pipeline.drop('a')
+    open()
+    await playing
+    await pipeline.stop()
+    expect(client.posts).toEqual([])
   })
 })

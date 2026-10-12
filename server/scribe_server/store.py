@@ -44,7 +44,18 @@ class Store:
         self._db.execute("pragma foreign_keys = on")
         self._db.execute("pragma journal_mode = wal")
         self._db.executescript(SCHEMA)
+        self._migrate()
         self._lock = threading.Lock()
+
+    def _migrate(self) -> None:
+        columns = {row["name"] for row in self._db.execute("pragma table_info(utterances)")}
+        if "client_key" not in columns:
+            # A client's own id for an utterance, so a retried post is stored once.
+            self._db.execute("alter table utterances add column client_key text")
+        self._db.execute(
+            "create unique index if not exists utterances_client_key "
+            "on utterances(session_id, client_key) where client_key is not null"
+        )
 
     def _all(self, sql: str, *args) -> list[dict]:
         with self._lock:
@@ -82,6 +93,9 @@ class Store:
             limit,
         )
 
+    def count_open_sessions(self) -> int:
+        return self._one("select count(*) as n from sessions where ended_at is null")["n"]
+
     def end_session(self, session_id: str) -> None:
         self._exec("update sessions set ended_at = ? where id = ? and ended_at is null", time.time(), session_id)
 
@@ -100,13 +114,22 @@ class Store:
         text: str,
         model_id: str | None,
         asr_ms: int | None,
-    ) -> dict:
+        client_key: str | None = None,
+    ) -> tuple[dict, bool]:
+        """Store a line; returns it and whether it is new (False: this client_key was stored before)."""
         cursor = self._exec(
-            "insert into utterances (session_id, speaker_id, speaker_name, started_at, duration_ms, text, model_id, asr_ms) "
-            "values (?, ?, ?, ?, ?, ?, ?, ?)",
-            session_id, speaker_id, speaker_name, started_at, duration_ms, text, model_id, asr_ms,
+            "insert into utterances (session_id, speaker_id, speaker_name, started_at, duration_ms, text, model_id, asr_ms, client_key) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?) on conflict do nothing",
+            session_id, speaker_id, speaker_name, started_at, duration_ms, text, model_id, asr_ms, client_key,
         )
-        return self._one("select * from utterances where id = ?", cursor.lastrowid)
+        if cursor.rowcount == 0:
+            return self.utterance_by_key(session_id, client_key), False
+        return self._one("select * from utterances where id = ?", cursor.lastrowid), True
+
+    def utterance_by_key(self, session_id: str, client_key: str | None) -> dict | None:
+        if client_key is None:
+            return None
+        return self._one("select * from utterances where session_id = ? and client_key = ?", session_id, client_key)
 
     def utterances(self, session_id: str) -> list[dict]:
         return self._all("select * from utterances where session_id = ? order by started_at, id", session_id)

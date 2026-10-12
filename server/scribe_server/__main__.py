@@ -37,6 +37,8 @@ def build(settings: Settings) -> Services:
         vad=SileroVad(settings.models_dir),
         auth=Auth(settings.api_token, settings.trust_localhost),
         audio_dir=settings.data_dir / "audio" if settings.keep_audio else None,
+        allowed_hosts=settings.host_allowlist(),
+        open_sessions_file=settings.data_dir / "open-sessions",
     )
     models.restore(settings.default_model)
     return services
