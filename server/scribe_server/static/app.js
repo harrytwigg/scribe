@@ -209,6 +209,8 @@ async function transcribeBlob(blob, name) {
 $('#try-file').addEventListener('change', (event) => {
   const file = event.target.files[0];
   if (file) transcribeBlob(file, file.name);
+  // Clear it, so picking the same clip again (to compare models) fires another change.
+  event.target.value = '';
 });
 
 function encodeWav(samples, rate) {

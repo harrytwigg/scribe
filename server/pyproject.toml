@@ -20,7 +20,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx>=0.28"]
+dev = [
+    "pytest>=8",
+    "httpx>=0.28",
+    "playwright>=1.63.0",
+]
 
 [project.scripts]
 scribe-server = "scribe_server.__main__:main"
@@ -33,5 +37,8 @@ build-backend = "hatchling.build"
 packages = ["scribe_server"]
 
 [tool.pytest.ini_options]
-markers = ["gpu: runs real models on the GPU and downloads them (slow)"]
-addopts = "-m 'not gpu'"
+markers = [
+  "gpu: runs real models on the GPU and downloads them (slow)",
+  "gui: drives the GUI in Chromium against a real server on the GPU",
+]
+addopts = "-m 'not gpu and not gui'"

@@ -21,6 +21,7 @@ main { padding: 24px; max-width: 1100px; margin: 0 auto; }
 .hint { color: var(--muted); }
 .error { color: var(--warn); }
 button { font: inherit; }
+a { color: var(--accent); }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
 .card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
