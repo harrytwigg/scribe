@@ -93,6 +93,7 @@ export class ScribeBot {
   private async onReady(tag: string) {
     this.log(`logged in as ${tag}`)
     await this.refreshOptouts().catch((error) => this.log('could not load opt-outs from the server', error))
+    await this.endStaleSessions().catch((error) => this.log('could not close stale sessions', error))
     const body = [commands.toJSON()]
     if (this.config.guildId) await this.client.application!.commands.set(body, this.config.guildId)
     else await this.client.application!.commands.set(body)
@@ -188,6 +189,7 @@ export class ScribeBot {
       await interaction.editReply('No model is active on the scribe server. Pick one in the GUI first.')
       return
     }
+    await this.endStaleSessions().catch((error) => this.log('could not close stale sessions', error))
     // Opt-outs live on the server; never start a call without the current list.
     try {
       await this.refreshOptouts()
@@ -203,6 +205,21 @@ export class ScribeBot {
       return
     }
     await interaction.editReply(`Transcribing ${channel} with ${status.active_model}.`)
+  }
+
+  /**
+   * End Discord sessions the server still has open but this bot is not running: left behind by a
+   * crash, a power cut, or a server that was down when a call stopped. Otherwise they count as
+   * open forever, and the host's idle check would never let it power off.
+   */
+  async endStaleSessions(): Promise<void> {
+    const running = new Set([...this.calls.values()].map((call) => call.sessionId))
+    for (const session of await this.server.listSessions()) {
+      if (session.source === 'discord' && session.ended_at == null && !running.has(session.id)) {
+        await this.server.endSession(session.id)
+        this.log(`ended stale session ${session.id}`)
+      }
+    }
   }
 
   /** Load opt-outs from the server, keeping (and re-sending) any it has not saved yet. */

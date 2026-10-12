@@ -62,4 +62,22 @@ describe('ScribeBot', () => {
     expect(optedOut().has('u9')).toBe(true)
     await bot.client.destroy()
   })
+
+  it('ends Discord sessions left open by a crash, and only those', async () => {
+    const ended: string[] = []
+    const server = {
+      listSessions: vi.fn().mockResolvedValue([
+        { id: 'stale', source: 'discord', ended_at: null },
+        { id: 'done', source: 'discord', ended_at: 5 },
+        { id: 'manual', source: 'manual', ended_at: null },
+        { id: 'live', source: 'discord', ended_at: null },
+      ]),
+      endSession: vi.fn(async (id: string) => void ended.push(id)),
+    }
+    const bot = new ScribeBot(config as never, server as never)
+    ;(bot as unknown as { calls: Map<string, unknown> }).calls.set('g1', { sessionId: 'live' })
+    await bot.endStaleSessions()
+    expect(ended).toEqual(['stale'])
+    await bot.client.destroy()
+  })
 })
