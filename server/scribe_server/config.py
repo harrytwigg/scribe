@@ -34,6 +34,7 @@ class Settings:
     keep_audio: bool
     default_model: str
     queue_depth: int
+    trust_localhost: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -48,6 +49,7 @@ class Settings:
             keep_audio=_flag("SCRIBE_KEEP_AUDIO"),
             default_model=os.environ.get("SCRIBE_DEFAULT_MODEL", "parakeet-tdt-0.6b-v2"),
             queue_depth=int(os.environ.get("SCRIBE_QUEUE_DEPTH", "32")),
+            trust_localhost=_flag("SCRIBE_TRUST_LOCALHOST"),
         )
 
     def check(self) -> None:

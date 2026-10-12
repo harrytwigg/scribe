@@ -1,9 +1,12 @@
 """Who may call the server (docs/spec.md, 3.7).
 
-- Requests from this machine are trusted, unless they arrived through a proxy (a forwarding header
-  is present): `tailscale serve` and Caddy both connect from loopback.
-- Everyone else needs the API token: as a bearer token (the bot, API clients), or as the session
-  cookie the GUI gets by signing in with it.
+- With a token configured, every request needs it, from this machine too: harry-box also runs
+  agent sessions, so loopback is not a trust boundary. It comes as a bearer token (the bot, API
+  clients), or as the session cookie the GUI gets by signing in with it.
+- `SCRIBE_TRUST_LOCALHOST=1` exempts loopback requests that did not come through a proxy (no
+  forwarding header: `tailscale serve` and Caddy both connect from loopback). Off by default.
+- Without a token, nothing is checked; the server then refuses to listen beyond loopback
+  (`Settings.check`). That is for development only.
 - Any request carrying an `Origin` that is not this server's own is refused, which stops other web
   pages in the browser from driving the API (CSRF), local or not.
 """
@@ -21,8 +24,9 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 class Auth:
-    def __init__(self, token: str | None):
+    def __init__(self, token: str | None, trust_localhost: bool = False):
         self._token = token
+        self._trust_localhost = trust_localhost
         self._sessions: set[str] = set()
 
     @property
@@ -52,7 +56,9 @@ class Auth:
             return host == "testclient"  # Starlette's TestClient; local in tests
 
     def authorised(self, request: Request) -> bool:
-        if self.is_local(request):
+        if self._token is None:
+            return True
+        if self._trust_localhost and self.is_local(request):
             return True
         header = request.headers.get("authorization", "")
         if header.lower().startswith("bearer ") and self.check_token(header[7:].strip()):

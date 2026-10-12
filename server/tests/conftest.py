@@ -128,7 +128,9 @@ class Harness:
             vad=energy_vad, auth=Auth(token),
         )
         self.app = create_app(self.services)
-        self.client = TestClient(self.app)
+        # The bot and API clients always send the token; `anonymous` is a client that does not.
+        self.client = TestClient(self.app, headers={"Authorization": f"Bearer {TOKEN}"} if token else {})
+        self.anonymous = TestClient(self.app)
 
     def ready(self, model_id: str = "alpha") -> None:
         self.models.download(model_id)

@@ -137,17 +137,44 @@ def test_optouts(harness):
     assert c.get("/api/optouts/discord").json() == []
 
 
-def test_remote_requests_need_the_token(harness):
-    c = harness.client
-    assert c.get("/api/models", headers=REMOTE).status_code == 401
-    assert c.get("/api/models", headers={**REMOTE, "Authorization": "Bearer wrong"}).status_code == 401
-    assert c.get("/api/models", headers={**REMOTE, "Authorization": f"Bearer {TOKEN}"}).status_code == 200
-    assert c.get("/", headers=REMOTE).status_code == 200  # the sign-in page itself is public
-    assert c.get("/api/whoami", headers=REMOTE).json() == {"authorised": False, "auth_enabled": True}
+def test_every_request_needs_the_token(harness):
+    c = harness.anonymous
+    for headers in ({}, REMOTE):  # loopback is not trusted: agent sessions share the box
+        assert c.get("/api/models", headers=headers).status_code == 401
+        assert c.get("/api/sessions", headers=headers).status_code == 401
+        assert c.post("/v1/audio/transcriptions", headers=headers).status_code == 401
+    assert c.get("/api/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert c.get("/api/models", headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 200
+    assert c.get("/").status_code == 200  # the sign-in page itself is public
+    assert c.get("/api/whoami").json() == {"authorised": False, "auth_enabled": True}
+
+
+def test_trust_localhost_is_opt_in(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from scribe_server.app import create_app
+    from scribe_server.auth import Auth
+
+    from .conftest import Harness
+
+    h = Harness(tmp_path)
+    h.services.auth = Auth(TOKEN, trust_localhost=True)
+    c = TestClient(create_app(h.services))
+    assert c.get("/api/models").status_code == 200
+    assert c.get("/api/models", headers=REMOTE).status_code == 401  # proxied: not local
+    h.worker.stop()
+
+
+def test_no_token_means_no_checks(tmp_path):
+    from .conftest import Harness
+
+    h = Harness(tmp_path, token=None)
+    assert h.client.get("/api/models", headers=REMOTE).status_code == 200
+    h.worker.stop()
 
 
 def test_gui_login_cookie(harness):
-    c = harness.client
+    c = harness.anonymous
     assert c.post("/api/login", json={"token": "wrong"}, headers=REMOTE).status_code == 401
     r = c.post("/api/login", json={"token": TOKEN}, headers=REMOTE)
     assert r.status_code == 200
@@ -196,11 +223,12 @@ def test_live_events_stream(harness):
             if server.started:
                 break
             time.sleep(0.05)
-        sid = httpx.post(f"{base}/api/sessions", json={"source": "discord"}).json()["id"]
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+        sid = httpx.post(f"{base}/api/sessions", json={"source": "discord"}, headers=auth).json()["id"]
         received = []
 
         def listen():
-            with httpx.stream("GET", f"{base}/api/sessions/{sid}/events", timeout=10) as response:
+            with httpx.stream("GET", f"{base}/api/sessions/{sid}/events", timeout=10, headers=auth) as response:
                 for raw in response.iter_lines():
                     if raw.startswith("data:"):
                         received.append(raw)
@@ -213,6 +241,7 @@ def test_live_events_stream(harness):
             f"{base}/api/sessions/{sid}/utterances",
             files={"file": ("u.wav", wav(tone(1)), "audio/wav")},
             data={"speaker_id": "u1", "speaker_name": "Ada", "started_at": str(time.time())},
+            headers=auth,
         )
         assert r.status_code == 201, r.text
         listener.join(5)

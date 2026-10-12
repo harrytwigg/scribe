@@ -226,8 +226,10 @@ reachable while the box is off is H5.
 
 ### 3.7 Auth (from phase 0)
 
-- Every request not from localhost must carry the server's API token: `Authorization: Bearer` for
-  the bot and API clients.
+- Every request must carry the server's API token, **including from localhost**: harry-box also
+  runs agent sessions, so loopback is not a trust boundary. `Authorization: Bearer` for the bot and
+  API clients. (`SCRIBE_TRUST_LOCALHOST=1` re-enables a loopback exemption for a single-user
+  machine; off by default.)
 - The GUI signs in with the same token once and gets a session cookie (`HttpOnly`,
   `SameSite=Strict`). State-changing requests from the GUI must also carry a matching `Origin`
   header. This blocks CSRF from any other page open in the browser (a multipart POST needs no
