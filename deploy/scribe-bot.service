@@ -1,0 +1,14 @@
+[Unit]
+Description=scribe Discord bot
+After=network-online.target scribe-server.service
+
+[Service]
+EnvironmentFile=%h/.config/scribe/env
+WorkingDirectory=%h/.local/opt/scribe/bot
+ExecStartPre=/bin/sh -c 'test -z "$SCRIBE_SECRETS_FILE" || test -r "$SCRIBE_SECRETS_FILE"'
+ExecStart=/usr/bin/env node dist/src/index.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

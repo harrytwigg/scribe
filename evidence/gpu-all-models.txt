@@ -1,0 +1,19 @@
+
+parakeet-tdt-0.6b-v2: wer=0.000 asr=116ms text='And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.'
+
+parakeet-tdt-0.6b-v3: wer=0.000 asr=121ms text='And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.'
+
+canary-1b-v2: wer=0.000 asr=280ms text='And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.'
+.
+whisper-large-v3-turbo: wer=0.000 asr=538ms text='And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.'
+.
+whisper-large-v3: wer=0.000 asr=864ms text='And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.'
+.
+distil-large-v3.5: wer=0.000 asr=356ms text='And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.'
+.
+whisper-small.en: wer=0.000 asr=298ms text='And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.'
+.
+whisper-tiny.en: wer=0.000 asr=208ms text='And so, my fellow Americans ask not what your country can do for you ask what you can do for your country.'
+..
+9 passed, 33 deselected in 1030.89s (0:17:10)
+exit 0

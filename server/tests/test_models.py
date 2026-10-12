@@ -146,3 +146,11 @@ def test_restore_reactivates_last_model(harness, tmp_path):
                          state_file=tmp_path / "state.json")
     again.restore(default="alpha")
     wait_until(lambda: again.active_id == "beta")
+
+
+def test_second_manager_on_same_dir_leaves_partials(tmp_path):
+    first = ModelManager(CATALOGUE, tmp_path / "models", loader=FakeLoader(), downloader=FakeDownloader())
+    (tmp_path / "models" / "beta.partial").mkdir()
+    ModelManager(CATALOGUE, tmp_path / "models", loader=FakeLoader(), downloader=FakeDownloader())
+    assert (tmp_path / "models" / "beta.partial").exists()
+    assert first.status("beta")["status"] == "not_downloaded"

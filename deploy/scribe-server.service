@@ -1,0 +1,15 @@
+[Unit]
+Description=scribe ASR server
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/scribe/env
+WorkingDirectory=%h/.local/opt/scribe/server
+# The secrets file may live on a network mount that comes up after the user session.
+ExecStartPre=/bin/sh -c 'test -z "$SCRIBE_SECRETS_FILE" || test -r "$SCRIBE_SECRETS_FILE"'
+ExecStart=%h/.local/opt/scribe/server/.venv/bin/python -m scribe_server
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

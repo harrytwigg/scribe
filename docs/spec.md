@@ -1,6 +1,6 @@
 # scribe: self-hosted call transcription
 
-Status: draft for review, 2026-10-12.
+Status: phase 0 built and tested; phase 1 deployed on harry-box with the live receive test outstanding (section 7). 2026-10-12.
 
 ## 1. Goal
 
@@ -33,8 +33,9 @@ Full notes with sources: `docs/research/discord.md` and `docs/research/asr.md`.
   a channel where someone is already present (whoever ran `/scribe join`), so it receives an MLS
   welcome at transition 0, which `lastTransitionId` treats as falsy, and decrypt errors are never
   recovered. The reporter's suggested `!== undefined` change is unmerged and partly a guess, and
-  the failure counter is per session, not per speaker. We carry it with `patch-package`, pinned to
-  the exact `@discordjs/voice` version, and it is only trusted once the live test passes.
+  the failure counter is per session, not per speaker. We carry the fix as a pnpm patch
+  (`bot/patches/`), which pnpm applies only to that exact `@discordjs/voice` version, and it is
+  only trusted once the live receive test passes.
 
 ### ASR: both model families run in one Python process on the Turing GPU
 
@@ -55,7 +56,7 @@ Open ASR leaderboard (mean WER / meeting WER on AMI / speed RTFx), for the catal
 | --- | --- | --- | --- | --- | --- |
 | Parakeet TDT 0.6B v2 (English) | 6.05 | 11.16 | 3386 | CC-BY-4.0 | onnx-asr |
 | Parakeet TDT 0.6B v3 (25 languages) | 6.34 | 11.31 | 3333 | CC-BY-4.0 | onnx-asr |
-| Canary 1B v2 (multilingual), unverified | n/a | n/a | n/a | CC-BY-4.0 | onnx-asr |
+| Canary 1B v2 (multilingual) | n/a | n/a | n/a | CC-BY-4.0 | onnx-asr |
 | distil-large-v3.5 | 7.21 | - | 202 | MIT | faster-whisper |
 | Whisper large-v3 (figures unverified) | 7.44 | - | 146 | MIT | faster-whisper |
 | Whisper large-v3-turbo (figures unverified) | 7.83 | - | 200 | MIT | faster-whisper |
@@ -128,14 +129,14 @@ This is a public-exposure decision and needs Harry (H3).
 2. On each `speaking.start` from a user who has not opted out, the bot subscribes to that user's
    Opus stream, ending after 800 ms of silence, and decodes to 48 kHz stereo PCM.
 3. An utterance is cut at the silence or at **25 s**, whichever comes first. Utterances shorter
-   than **400 ms** are dropped (keyboard, breath). Each is downmixed and resampled to 16 kHz mono,
-   wrapped as WAV, and posted to `POST /api/sessions/{id}/utterances` with the speaker's id,
+   than **400 ms** are dropped (keyboard, breath). Each is downmixed to mono, wrapped as a 48 kHz
+   WAV (the server resamples to 16 kHz), and posted to `POST /api/sessions/{id}/utterances` with the speaker's id,
    display name and start time.
 4. The server transcribes it with the active model (3.3), stores the line, and pushes it to live
    listeners (SSE).
 5. If the server answers 503 (queue full) or times out, the bot retries twice with backoff
    (1 s, 3 s), then records a `[unavailable: N s of audio from <speaker>]` marker line instead of
-   blocking the call.
+   blocking the call (`POST /api/sessions/{id}/markers`).
 6. `/scribe stop`, usable by **anyone in the channel**, ends the session and the bot leaves. The
    session also ends when the bot is alone in the channel.
 7. Consent: a user who joins after the start is re-told by a channel message on their
@@ -268,8 +269,8 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 
 | Phase | Scope | Needs Harry |
 | --- | --- | --- |
-| 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on harry-box. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | No |
-| 1 | **Live DAVE smoke test first** (6); then systemd units, soak test, and the auto-shutdown gate as a separate company-infra change | H1, H2 (asked now, so the test is not last), H5 |
+| 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on harry-box. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | Done |
+| 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on harry-box. Then a soak test, and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call |
 | 2 | Public ingress via the tools host + tailnet policy | H3 |
 | 3 | Chrome extension for Meet / any browser call | No on the tailnet; H3 if off it |
 | 4 | Diarization for single-stream sources, LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
@@ -295,21 +296,19 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 - **Licences.** Parakeet and Canary are CC-BY-4.0 (attribution), Whisper MIT; fine for personal
   use.
 
-## 9. Decisions needed from Harry
+## 9. Decisions
 
-- **H1 Bot identity.** A new Discord application for scribe (recommended, keeps its permissions
-  and token separate), or reuse the existing bot application whose token is already in
-  `secrets/api-keys.json`. Needed for the phase 1 live test.
-- **H2 Where it may record.** Which server and voice channels, whether the notice + nickname +
-  opt-out is enough consent for the people in them, and whether transcripts may be echoed into a
-  Discord thread (off by default).
-- **H3 Public ingress.** Tailnet-only (recommended until the Chrome extension needs off-tailnet
-  use), or `scribe.<domain>` on the tools host. If public: the domain; a tagged single-use
-  Tailscale auth key for the tools host, with key expiry disabled on that node; and the tailnet
-  policy change (wider than one line if the tailnet is still allow-all).
-- **H4 Retention.** Audio: off (recommended) or kept N days. Transcripts: kept until deleted
-  (recommended) or auto-deleted after N days.
-- **H5 Availability.** harry-box is off most of the time. Either on-demand (you wake the box
-  before a call; simplest), or an always-on bot on gateway-host that wakes harry-box on
-  `/scribe join` and buffers audio until the server is up (more moving parts; needed if scribe is
-  to replace Scripty for unplanned calls).
+Harry asked for the build to go ahead without further questions (2026-10-12), so the recommended
+option was taken for each. Any can be revisited.
+
+- **H1 Bot identity: reuse the existing bot application** ("Longbow Dev", user "Harry test"), whose
+  token is already in the instance's secrets file (`DISCORD_BOT_TOKEN`). The bot reads it under
+  `SCRIBE_DISCORD_TOKEN_KEY`, so moving to a dedicated application later is a config change.
+- **H2 Where: the Longbow server**, slash commands registered there only (`SCRIBE_GUILD_ID`). The
+  notice, nickname and `/scribe optout` are the consent mechanism; transcripts are not echoed into
+  Discord (`SCRIBE_ECHO` off).
+- **H3 Ingress: tailnet-only.** Public exposure is not needed for the Discord path (3.1). The tools
+  host route stays the plan for phase 3, when the Chrome extension needs off-tailnet access.
+- **H4 Retention: no audio kept; transcripts kept until deleted** in the GUI.
+- **H5 Availability: on demand.** harry-box must be on for a call; both services start at boot. An
+  always-on bot host is phase 4.

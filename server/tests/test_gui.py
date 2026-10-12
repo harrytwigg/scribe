@@ -9,6 +9,7 @@ Screenshots land in SCRIBE_GUI_SHOTS (default ../evidence/gui).
 
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,10 +36,11 @@ def server():
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
+    data_dir = tempfile.mkdtemp(prefix="scribe-gui-")
     env = {
         **os.environ,
         "SCRIBE_PORT": str(port),
-        "SCRIBE_DATA_DIR": tempfile.mkdtemp(prefix="scribe-gui-"),
+        "SCRIBE_DATA_DIR": data_dir,
         "SCRIBE_MODELS_DIR": os.environ.get("SCRIBE_MODELS_DIR", str(Path("~/.local/share/scribe/models").expanduser())),
         "SCRIBE_API_TOKEN": TOKEN,
         "SCRIBE_DEFAULT_MODEL": "",
@@ -54,6 +56,7 @@ def server():
     yield base
     process.terminate()
     process.wait(10)
+    shutil.rmtree(data_dir, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")

@@ -8,9 +8,9 @@
 // SCRIBE_E2E_MODELS=<first>,<second> picks the models (default Parakeet v2, then Whisper turbo).
 
 import { type ChildProcess, spawn } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -28,6 +28,7 @@ const JFK = 'And so my fellow Americans ask not what your country can do for you
 const LIBRI: Record<string, string> = JSON.parse(readFileSync(join(FIXTURES, 'librispeech.json'), 'utf8'))
 
 let server: ChildProcess
+let dataDir = ''
 let base = ''
 const log: string[] = []
 
@@ -83,6 +84,7 @@ async function activate(id: string) {
 
 beforeAll(async () => {
   const port = await freePort()
+  dataDir = mkdtempSync(join(tmpdir(), 'scribe-e2e-'))
   base = `http://127.0.0.1:${port}`
   server = spawn(join(SERVER, '.venv', 'bin', 'python'), ['-m', 'scribe_server'], {
     cwd: SERVER,
@@ -90,7 +92,9 @@ beforeAll(async () => {
       ...process.env,
       SCRIBE_HOST: '127.0.0.1',
       SCRIBE_PORT: String(port),
-      SCRIBE_DATA_DIR: mkdtempSync(join(tmpdir(), 'scribe-e2e-')),
+      SCRIBE_DATA_DIR: dataDir,
+      // Share the installed models rather than downloading them again.
+      SCRIBE_MODELS_DIR: process.env.SCRIBE_MODELS_DIR ?? join(homedir(), '.local', 'share', 'scribe', 'models'),
       SCRIBE_API_TOKEN: TOKEN,
       SCRIBE_DEFAULT_MODEL: '',
     },
@@ -106,6 +110,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   server?.kill('SIGTERM')
+  if (dataDir) rmSync(dataDir, { recursive: true, force: true })
   if (process.env.SCRIBE_E2E_LOG) writeFileSync(process.env.SCRIBE_E2E_LOG, log.join(''))
 })
 

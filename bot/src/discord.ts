@@ -167,7 +167,20 @@ export class ScribeBot {
       await interaction.editReply('No model is active on the scribe server. Pick one in the GUI first.')
       return
     }
-    await this.join(channel)
+    // Opt-outs live on the server; never start a call without the current list.
+    try {
+      this.optedOut = await this.server.optouts()
+    } catch {
+      await interaction.editReply('Could not load opt-outs from the scribe server, so not starting.')
+      return
+    }
+    try {
+      await this.join(channel)
+    } catch (error) {
+      this.log('join failed', error)
+      await interaction.editReply(`Could not start: ${error instanceof Error ? error.message : error}`)
+      return
+    }
     await interaction.editReply(`Transcribing ${channel} with ${status.active_model}.`)
   }
 
@@ -183,8 +196,14 @@ export class ScribeBot {
     })
     if (this.config.debugVoice) connection.on('debug', (message) => this.log('[voice]', message))
     connection.on('error', (error) => this.log('voice connection error', error))
-    await entersState(connection, VoiceConnectionStatus.Ready, 20_000)
-    const session = await this.server.createSession(`${guild.name} #${channel.name}`, guild.id, channel.id)
+    let session: { id: string }
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, 20_000)
+      session = await this.server.createSession(`${guild.name} #${channel.name}`, guild.id, channel.id)
+    } catch (error) {
+      connection.destroy()
+      throw error
+    }
     const names = new Map<string, string>()
     const pipeline = new Pipeline({
       source: new DiscordVoiceSource(connection),

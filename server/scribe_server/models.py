@@ -1,5 +1,6 @@
 """Model state: downloads, the one active model, and swapping it safely (docs/spec.md, 3.3)."""
 
+import fcntl
 import json
 import logging
 import os
@@ -109,7 +110,14 @@ class ModelManager:
         self._active: LoadedModel | None = None
         self._loading: str | None = None
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._clean_partials()
+        # Leftover partial downloads are cleaned only by the first server on this directory; a
+        # second one (a test run beside the installed service) must not delete a live download.
+        self._lock_file = open(self._dir / ".scribe.lock", "w")
+        try:
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._clean_partials()
+        except BlockingIOError:
+            log.warning("another scribe server uses %s; leaving partial downloads alone", self._dir)
 
     # -- paths and state ------------------------------------------------------------------------
 
