@@ -213,9 +213,13 @@ export class ScribeBot {
    * open forever, and the host's idle check would never let it power off.
    */
   async endStaleSessions(): Promise<void> {
+    const sessions = await this.server.listSessions()
+    // Read after the await: a guild that finished joining meanwhile is running, and one still
+    // joining may have just created its session, so neither is stale.
     const running = new Set([...this.calls.values()].map((call) => call.sessionId))
-    for (const session of await this.server.listSessions()) {
-      if (session.source === 'discord' && session.ended_at == null && !running.has(session.id)) {
+    for (const session of sessions) {
+      const joining = session.guild != null && this.joining.has(session.guild)
+      if (session.source === 'discord' && session.ended_at == null && !running.has(session.id) && !joining) {
         await this.server.endSession(session.id)
         this.log(`ended stale session ${session.id}`)
       }

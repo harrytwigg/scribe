@@ -71,11 +71,13 @@ describe('ScribeBot', () => {
         { id: 'done', source: 'discord', ended_at: 5 },
         { id: 'manual', source: 'manual', ended_at: null },
         { id: 'live', source: 'discord', ended_at: null },
+        { id: 'joining', source: 'discord', guild: 'g2', ended_at: null }, // another guild mid-join
       ]),
       endSession: vi.fn(async (id: string) => void ended.push(id)),
     }
     const bot = new ScribeBot(config as never, server as never)
     ;(bot as unknown as { calls: Map<string, unknown> }).calls.set('g1', { sessionId: 'live' })
+    ;(bot as unknown as { joining: Set<string> }).joining.add('g2')
     await bot.endStaleSessions()
     expect(ended).toEqual(['stale'])
     await bot.client.destroy()

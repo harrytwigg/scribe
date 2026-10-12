@@ -67,7 +67,7 @@ export class ScribeClient {
   }
 
   listSessions() {
-    return this.request<{ id: string; source: string; ended_at: number | null }[]>('GET', '/api/sessions')
+    return this.request<{ id: string; source: string; guild: string | null; ended_at: number | null }[]>('GET', '/api/sessions')
   }
 
   endSession(id: string) {
