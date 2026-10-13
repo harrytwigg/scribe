@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>scribe settings</title>
+<link rel="stylesheet" href="ui.css">
+<main class="options">
+  <h1>scribe settings</h1>
+  <form id="form">
+    <label>Server <input name="server" type="url" required placeholder="http://harry-box:8787"></label>
+    <label>API token <input name="token" type="password" autocomplete="off" required></label>
+    <label>Your name in transcripts <input name="myName" required></label>
+    <label>Name for the other side <input name="othersName" required></label>
+    <label class="row"><input name="useMic" type="checkbox"> Transcribe my microphone too</label>
+    <button class="primary">Save and test</button>
+  </form>
+  <p id="result"></p>
+  <h2>Microphone</h2>
+  <p class="muted">Chrome only lets the extension use the mic once you allow it here.</p>
+  <button id="mic">Allow microphone</button> <span id="mic-state" class="muted"></span>
+</main>
+<script type="module" src="options.js"></script>

@@ -8,7 +8,9 @@
 - Without a token, nothing is checked; the server then refuses to listen beyond loopback
   (`Settings.check`). That is for development only.
 - Any request carrying an `Origin` that is not this server's own is refused, which stops other web
-  pages in the browser from driving the API (CSRF), local or not.
+  pages in the browser from driving the API (CSRF), local or not. The one exception is the scribe
+  Chrome extension's own origin (`extension_origins`, docs/spec.md 4): a web page cannot send a
+  `chrome-extension://` origin, and its requests are authorised like any other (token or cookie).
 """
 
 import hmac
@@ -24,9 +26,10 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 class Auth:
-    def __init__(self, token: str | None, trust_localhost: bool = False):
+    def __init__(self, token: str | None, trust_localhost: bool = False, extension_origins: tuple[str, ...] = ()):
         self._token = token
         self._trust_localhost = trust_localhost
+        self._extension_origins = frozenset(extension_origins)
         self._sessions: set[str] = set()
 
     @property
@@ -72,8 +75,11 @@ class Auth:
             return True
         return urlsplit(origin).netloc == request.headers.get("host", "")
 
+    def allowed_origin(self, request: Request) -> bool:
+        return self.same_origin(request) or request.headers.get("origin") in self._extension_origins
+
     def guard(self, request: Request) -> None:
-        if request.method not in SAFE_METHODS and not self.same_origin(request):
+        if request.method not in SAFE_METHODS and not self.allowed_origin(request):
             raise HTTPException(403, "cross-origin request refused")
         if not self.authorised(request):
             raise HTTPException(401, "sign in, or send the API token as a bearer token")

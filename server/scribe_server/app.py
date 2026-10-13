@@ -1,6 +1,7 @@
 """HTTP API and GUI (docs/spec.md, 3.3 and 3.4)."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -38,6 +39,9 @@ class Services:
     max_upload_bytes: int = 512 * 1024 * 1024
     # Holds the number of open sessions, for the host's idle check to read without a token.
     open_sessions_file: Path | None = None
+    # A browser session with no line or heartbeat for this long is ended: the browser quit or
+    # crashed mid-call, and nothing else would end it (docs/spec.md, 4).
+    browser_idle_s: float = 300
 
 
 @dataclass
@@ -98,9 +102,47 @@ class OptOut(BaseModel):
 
 
 def create_app(services: Services) -> FastAPI:
-    app = FastAPI(title="scribe", docs_url=None, redoc_url=None)
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI):
+        async def loop():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await reap_idle()
+                except Exception:
+                    log.exception("reaping idle browser sessions failed")
+
+        task = asyncio.create_task(loop())
+        yield
+        task.cancel()
+
+    app = FastAPI(title="scribe", docs_url=None, redoc_url=None, lifespan=lifespan)
     hub = Hub()
     s = services
+    # When each open session last showed signs of life. A session from before a restart counts
+    # from the restart, so it gets the full grace period.
+    last_seen: dict[str, float] = {}
+    booted = time.time()
+
+    def touch(session_id: str) -> None:
+        last_seen[session_id] = time.time()
+
+    async def reap_idle(now: float | None = None) -> list[str]:
+        """End browser sessions that went quiet: no line and no heartbeat for `browser_idle_s`."""
+        now = time.time() if now is None else now
+        reaped = []
+        for session in s.store.open_sessions("browser"):
+            if now - last_seen.get(session["id"], booted) > s.browser_idle_s:
+                s.store.end_session(session["id"])
+                last_seen.pop(session["id"], None)
+                hub.publish(session["id"], "end", s.store.get_session(session["id"]))
+                reaped.append(session["id"])
+        if reaped:
+            log.info("ended %d abandoned browser session(s)", len(reaped))
+            write_open_sessions()
+        return reaped
+
+    app.state.reap_idle = reap_idle
     if s.allowed_hosts is not None:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=s.allowed_hosts)
 
@@ -243,6 +285,7 @@ def create_app(services: Services) -> FastAPI:
     def create_session(body: NewSession) -> dict:
         title = body.title or time.strftime("%Y-%m-%d %H:%M ") + body.source
         session = s.store.create_session(body.source, title, body.guild, body.channel)
+        touch(session["id"])
         write_open_sessions()
         return session
 
@@ -258,15 +301,25 @@ def create_app(services: Services) -> FastAPI:
     async def end_session(session_id: str) -> dict:  # async: publish on the event loop
         session_or_404(session_id)
         s.store.end_session(session_id)
+        last_seen.pop(session_id, None)
         write_open_sessions()
         session = s.store.get_session(session_id)
         hub.publish(session_id, "end", session)
         return session
 
+    @app.post("/api/sessions/{session_id}/heartbeat", dependencies=[Depends(guard)])
+    def heartbeat(session_id: str) -> dict:
+        """A live client keeps a quiet call open (see `browser_idle_s`); 409 once it has ended."""
+        if session_or_404(session_id)["ended_at"] is not None:
+            raise HTTPException(409, "session has ended")
+        touch(session_id)
+        return {"ok": True}
+
     @app.delete("/api/sessions/{session_id}", dependencies=[Depends(guard)])
     def delete_session(session_id: str) -> dict:
         session_or_404(session_id)
         s.store.delete_session(session_id)
+        last_seen.pop(session_id, None)
         write_open_sessions()
         if s.audio_dir:
             for path in (s.audio_dir / session_id).glob("*.wav"):
@@ -286,6 +339,7 @@ def create_app(services: Services) -> FastAPI:
         session = session_or_404(session_id)
         if session["ended_at"] is not None:
             raise HTTPException(409, "session has ended")
+        touch(session_id)
         if existing := s.store.utterance_by_key(session_id, client_key):
             return existing
         data = await read_upload(file)
@@ -308,6 +362,7 @@ def create_app(services: Services) -> FastAPI:
     async def add_marker(session_id: str, body: Marker) -> dict:  # async: publish on the event loop
         """A line with no audio behind it, e.g. the bot recording audio it could not deliver."""
         session_or_404(session_id)
+        touch(session_id)
         line, _ = s.store.add_utterance(session_id, body.speaker_id, body.speaker_name, body.started_at, 0, body.text, None, None)
         hub.publish(session_id, "line", line)
         return line

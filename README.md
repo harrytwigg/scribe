@@ -1,11 +1,13 @@
 # scribe
 
 Self-hosted call transcription where you pick the speech-recognition model. A Discord bot
-transcribes each speaker in a voice channel; the transcription runs on a local GPU with open-source
+transcribes each speaker in a voice channel, and a Chrome extension transcribes Google Meet (or
+any call in a browser tab) without anything joining the call. The transcription runs on a local GPU with open-source
 models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in a web GUI.
 
 - `server/`: Python ASR server and GUI (FastAPI; faster-whisper and onnx-asr on CUDA).
 - `bot/`: Discord bot (discord.js, `@discordjs/voice` with DAVE).
+- `extension/`: Chrome extension for Meet and other browser calls (tab audio + mic, no bot).
 - `deploy/`: systemd user units and the install script.
 - `docs/spec.md`: design, decisions, phases. `docs/research/`: the research behind it.
 
@@ -17,6 +19,19 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
    `/scribe stop` ends it (anyone in the call can); `/scribe optout` excludes you for good.
 4. **History** keeps every transcript, with Markdown, SRT and JSON export.
 5. **Try it** transcribes a file with the active model, to compare models on the same clip.
+
+### Google Meet (or any call in a browser tab)
+
+1. In Chrome, open `chrome://extensions`, turn on **Developer mode**, **Load unpacked**, and pick
+   the `extension/` folder.
+2. In the extension's **Settings**: the server (`http://harry-box:8787`), the API token and your
+   name. Press **Allow microphone** once.
+3. In the Meet tab, click the scribe icon, then **Transcribe this tab**. Lines from the call
+   ("Others") and your mic (your name) appear under **Live** in the GUI. **Stop**, closing or
+   leaving the tab, or 10 minutes with no speech ends it.
+
+Use headphones: on speakers, the others may hear themselves echo. Tell people you are
+transcribing: unlike the Discord bot, nothing in the call announces it.
 
 ## Developing
 
@@ -31,6 +46,9 @@ pnpm test                         # unit tests
 pnpm e2e                          # two replayed speakers through the bot pipeline into a real
                                   # server, with a model swap mid-call
 pnpm build && node dist/src/smoke.js   # live: join an empty voice channel (DAVE handshake), leave
+
+cd extension && npm test          # unit tests (Node 22, no dependencies)
+cd server && uv run pytest -m extension -s   # the extension in Chromium into a real GPU server
 ```
 
 `pnpm e2e` replays audio after `receiver.subscribe`: it does not exercise Discord's transport, DAVE

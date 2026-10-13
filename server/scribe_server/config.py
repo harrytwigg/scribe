@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# The Chrome extension in extension/: its manifest pins this ID with a public `key`, so an unpacked
+# install gets the same origin on every machine. SCRIBE_EXTENSION_ORIGINS="" turns it off.
+EXTENSION_ORIGIN = "chrome-extension://mcnpmckibkddnnenfondlblnddldonfm"
+
+
 def _flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -36,6 +41,8 @@ class Settings:
     queue_depth: int
     trust_localhost: bool = False
     allowed_hosts: tuple[str, ...] = ()
+    extension_origins: tuple[str, ...] = (EXTENSION_ORIGIN,)
+    browser_idle_s: float = 300
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,6 +59,10 @@ class Settings:
             queue_depth=int(os.environ.get("SCRIBE_QUEUE_DEPTH", "32")),
             trust_localhost=_flag("SCRIBE_TRUST_LOCALHOST"),
             allowed_hosts=tuple(h.strip() for h in os.environ.get("SCRIBE_ALLOWED_HOSTS", "").split(",") if h.strip()),
+            browser_idle_s=float(os.environ.get("SCRIBE_BROWSER_IDLE_SECONDS", "300")),
+            extension_origins=tuple(
+                o.strip() for o in os.environ.get("SCRIBE_EXTENSION_ORIGINS", EXTENSION_ORIGIN).split(",") if o.strip()
+            ),
         )
 
     def host_allowlist(self) -> list[str]:

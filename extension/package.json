@@ -1,0 +1,10 @@
+{
+  "name": "scribe-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension: transcribe a browser call on the scribe server",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

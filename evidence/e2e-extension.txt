@@ -1,0 +1,51 @@
+# extension unit tests (cd extension && npm test)
+ok 1 - a live call sends a heartbeat and carries on
+ok 2 - ten minutes without a transcribed line ends the call
+ok 3 - a session the server ended (reaped while asleep) ends the call
+ok 4 - an unreachable server does not end the call
+ok 5 - a failed session create leaves the call done, so the next start is allowed
+ok 6 - a busy server is retried with the same key, then succeeds
+ok 7 - giving up leaves a marker line
+ok 8 - a client error is not retried
+ok 9 - sessions are created with the browser source
+ok 10 - wav header and clipping
+ok 11 - an utterance ends after the silence gap, keeping its onset
+ok 12 - a gap shorter than the silence threshold does not split
+ok 13 - long speech is cut at the cap and carries on
+ok 14 - a sound that never dips becomes the noise floor and stops counting as speech
+ok 15 - blips shorter than the speech floor are dropped
+ok 16 - a steady noise floor is not speech, but speech over it is
+ok 17 - flush closes an open utterance
+# tests 17
+# pass 17
+# fail 0
+
+# server unit tests (cd server && uv run pytest -q)
+46 passed, 11 deselected in 5.60s
+
+# extension in Chromium into a real GPU server (cd server && uv run pytest -m extension -s)
+============================= test session starts ==============================
+collected 57 items / 56 deselected / 1 selected
+
+tests/test_extension.py [
+ {
+  "speaker_id": "mic",
+  "speaker_name": "Harry",
+  "text": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+  "model_id": "parakeet-tdt-0.6b-v2"
+ },
+ {
+  "speaker_id": "tab",
+  "speaker_name": "Meet",
+  "text": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+  "model_id": "parakeet-tdt-0.6b-v2"
+ }
+]
+.
+
+====================== 1 passed, 56 deselected in 21.08s =======================
+
+# negative check: SCRIBE_EXTENSION_ORIGINS="" -> the same run fails with: ServerError: cross-origin request refused
+# reaper live under uvicorn: SCRIBE_BROWSER_IDLE_SECONDS=1, one browser session -> ended by the 60 s loop (log: 'ended 1 abandoned browser session(s)'), open-sessions file 1 -> 0
+# deployed harry-box server: POST /api/sessions with the extension's Origin -> 201; another extension ID -> 403
+# navigation (round 3): pushState/replaceState/#hash in the captured tab keep the call; reload ends it. Same e2e run against the old tabs.onUpdated listener fails: "a same-document URL change ended the call"
