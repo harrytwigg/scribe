@@ -20,7 +20,15 @@ export interface ReplayClip {
   pcm: Buffer
   /** When the user starts speaking, ms after `play()` (scaled by `speed`). */
   atMs: number
+  /**
+   * Undecodable packets sent ahead of the speech, as Discord delivers a DAVE frame the bot cannot
+   * decrypt yet (just after joining, or mid key change).
+   */
+  corruptFirst?: number
 }
+
+/** Not an Opus packet: what an encrypted DAVE frame looks like to the decoder. */
+const CORRUPT_PACKET = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x01, 0x02, 0x03])
 
 /** Read a 16-bit PCM WAV and return it as 48 kHz stereo s16le (linear-interpolated). */
 export function loadWav(path: string): Buffer {
@@ -117,7 +125,10 @@ export class ReplaySource implements VoiceSource {
   /** Play every clip; resolves when all have finished. Clips of one user must not overlap. */
   async play(): Promise<void> {
     // Encode first, so encoding time does not shift the timeline.
-    const encoded = this.clips.map((clip) => encodeOpus(clip.pcm))
+    const encoded = this.clips.map((clip) => [
+      ...Array<Buffer>(clip.corruptFirst ?? 0).fill(CORRUPT_PACKET),
+      ...encodeOpus(clip.pcm),
+    ])
     await Promise.all(this.clips.map((clip, i) => this.speak(clip, encoded[i])))
   }
 }

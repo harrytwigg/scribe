@@ -137,6 +137,7 @@ export class ScribeBot {
         content: [
           status ? `Model: ${status.active_model ?? 'none active'}` : 'The scribe server is unreachable.',
           call ? `Transcribing ${call.channel}.` : 'Not transcribing in this server.',
+          ...(call ? this.whoIsHeard(call) : []),
         ].join('\n'),
         flags: MessageFlags.Ephemeral,
       })
@@ -314,6 +315,18 @@ export class ScribeBot {
     }
   }
 
+  /** One line per person in the call: whether their speech is reaching the transcript. */
+  private whoIsHeard(call: Call): string[] {
+    return call.channel.members
+      .filter((member) => !member.user.bot)
+      .map((member) => {
+        const heard = call.pipeline.heard.get(member.id)
+        if (this.optedOut.has(member.id)) return `- ${member.displayName}: opted out`
+        if (!heard?.packets) return `- ${member.displayName}: not heard yet`
+        return `- ${member.displayName}: ${heard.lines} line${heard.lines === 1 ? '' : 's'}`
+      })
+  }
+
   async stop(guildId: string, reason: string): Promise<void> {
     const call = this.calls.get(guildId)
     if (!call) return
@@ -326,6 +339,10 @@ export class ScribeBot {
       await this.notice(call.channel, `⏹️ Transcription stopped (${reason}).${where}`)
       this.calls.delete(guildId)
       this.log(`stopped session ${call.sessionId}: ${reason}`)
+      for (const [userId, heard] of call.pipeline.heard) {
+        const name = call.guild.members.cache.get(userId)?.displayName ?? userId
+        this.log(`  heard ${name}: ${heard.lines} lines, ${heard.packets} packets, ${heard.corrupt} undecodable`)
+      }
     })()
     await call.stopping
   }

@@ -2,7 +2,7 @@
 
 import type { Readable } from 'node:stream'
 
-import prism from 'prism-media'
+import OpusScript from 'opusscript'
 
 import type { ScribeClient, Speaker } from './client.js'
 import { Segmenter } from './segmenter.js'
@@ -21,8 +21,18 @@ export interface PipelineOptions {
   onError?: (error: unknown) => void
 }
 
+/** What has been heard from one user this call, for `/scribe status` and the end-of-call log. */
+export interface Heard {
+  packets: number
+  /** Packets that would not decode: a DAVE frame before the session can decrypt it, or damage. */
+  corrupt: number
+  /** Lines the server transcribed (utterances it found no speech in are not counted). */
+  lines: number
+}
+
 export class Pipeline {
   private readonly active = new Map<string, { segmenter: Segmenter; opus: Readable }>()
+  readonly heard = new Map<string, Heard>()
   private readonly pending = new Set<Promise<unknown>>()
   private stopped = false
 
@@ -34,11 +44,16 @@ export class Pipeline {
     const { source, client, sessionId, isOptedOut, onLine, onError } = this.options
     if (this.stopped || this.active.has(userId) || isOptedOut(userId)) return
     const speakerPromise = Promise.resolve(this.options.speaker(userId))
+    const heard = this.heard.get(userId) ?? { packets: 0, corrupt: 0, lines: 0 }
+    this.heard.set(userId, heard)
     const segmenter = new Segmenter((utterance) => {
       const job = speakerPromise
         .then((speaker) =>
           client.postUtterance(sessionId, speaker, utterance.pcm, utterance.startedAt, () => !isOptedOut(userId)).then((result) => {
-            if (result.ok && result.text) onLine?.(speaker, result.text)
+            if (result.ok && result.text) {
+              heard.lines++
+              onLine?.(speaker, result.text)
+            }
             if (!result.ok) onError?.(new Error(`utterance from ${speaker.name} lost: ${result.error}`))
           }),
         )
@@ -47,23 +62,44 @@ export class Pipeline {
       this.pending.add(job)
     })
     const opus = source.subscribe(userId, SILENCE_MS)
-    const decoder = new prism.opus.Decoder({ rate: 48_000, channels: 2, frameSize: 960 })
+    // Each packet is decoded on its own, so a bad one costs that packet only. A stream decoder
+    // (prism's Transform) is destroyed by its first bad packet and then silently stops the user
+    // being heard for the rest of the call: the bug that lost a whole speaker (docs/spec.md, 3.2).
+    const decoder = new OpusScript(48_000, 2, OpusScript.Application.AUDIO)
     this.active.set(userId, { segmenter, opus })
-    const done = () => {
+    let corrupt = 0
+    let finished = false
+    const finish = () => {
+      if (finished) return
+      finished = true
+      decoder.delete()
+      if (corrupt) {
+        void speakerPromise
+          .then((speaker) => onError?.(new Error(`skipped ${corrupt} undecodable packet(s) from ${speaker.name}`)))
+          .catch(() => {})
+      }
+      // Dropped (opt-out) or stopped streams are already out of `active`, and must not flush here.
       if (this.active.get(userId)?.opus !== opus) return
       this.active.delete(userId)
       segmenter.flush()
     }
-    // A corrupt packet (a DAVE decrypt failure surfaces here) loses that packet, not the stream.
-    decoder.on('error', (error) => onError?.(error))
-    opus.on('error', (error) => {
-      onError?.(error)
-      done()
+    opus.on('data', (packet: Buffer) => {
+      if (finished) return
+      heard.packets++
+      let pcm: Buffer
+      try {
+        pcm = decoder.decode(packet)
+      } catch {
+        corrupt++
+        heard.corrupt++
+        return
+      }
+      segmenter.push(pcm)
     })
-    decoder.on('data', (pcm: Buffer) => segmenter.push(pcm))
-    decoder.on('end', done)
-    opus.on('end', () => decoder.end())
-    opus.pipe(decoder, { end: false })
+    opus.on('error', (error) => onError?.(error))
+    opus.on('end', finish)
+    // Destroyed without ending (an error, an opt-out, the call stopping): still release the user.
+    opus.on('close', finish)
   }
 
   /** Stop listening to one user at once, discarding what they were saying (opt-out). */

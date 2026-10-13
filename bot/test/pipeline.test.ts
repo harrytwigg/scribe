@@ -78,6 +78,53 @@ describe('Pipeline with a replayed call', () => {
   })
 })
 
+describe('Pipeline with undecodable packets', () => {
+  it('keeps hearing a speaker whose first packet cannot be decoded', async () => {
+    // LON-49: one bad packet as the bot joined destroyed that user's decoder, and they were never
+    // heard again for the rest of the call, while everyone else was.
+    const source = new ReplaySource(
+      [
+        { userId: 'harry', pcm: tone(2000, 300), atMs: 0, corruptFirst: 1 },
+        { userId: 'badger', pcm: tone(2000, 500), atMs: 200 },
+        { userId: 'harry', pcm: tone(1500, 300), atMs: 4000 },
+      ],
+      20,
+    )
+    const client = new RecordingClient()
+    const errors: string[] = []
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: () => false,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    })
+    await source.play()
+    await pipeline.stop()
+    const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
+    expect(byUser('harry')).toEqual([2000, 1500])
+    expect(byUser('badger')).toEqual([2000])
+    expect(pipeline.heard.get('harry')).toMatchObject({ corrupt: 1, lines: 2 })
+    expect(errors).toEqual(['skipped 1 undecodable packet(s) from harry'])
+  })
+
+  it('loses only the bad packets, not the speech after them', async () => {
+    const source = new ReplaySource([{ userId: 'a', pcm: tone(1000, 300), atMs: 0, corruptFirst: 5 }], 20)
+    const client = new RecordingClient()
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: () => false,
+    })
+    await source.play()
+    await pipeline.stop()
+    expect(client.posts.map((p) => Math.round(p.ms / 100) * 100)).toEqual([1000])
+  })
+})
+
 describe('Pipeline opt-out', () => {
   it('never posts speech already cut when the speaker opts out', async () => {
     // 30 s turn: the first 25 s is cut and queued while the speaker is still talking.

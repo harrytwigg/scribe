@@ -82,4 +82,18 @@ describe('ScribeBot', () => {
     expect(ended).toEqual(['stale'])
     await bot.client.destroy()
   })
+
+  it('/scribe status says, per person in the call, whether they are being heard', async () => {
+    const { Collection } = await import('discord.js')
+    const bot = new ScribeBot(config as never, {} as never)
+    ;(bot as unknown as { optedOut: Set<string> }).optedOut = new Set(['c'])
+    const member = (id: string, displayName: string, bot = false) => [id, { id, displayName, user: { bot } }] as const
+    const call = {
+      channel: { members: new Collection([member('a', 'Harry'), member('b', 'Badger'), member('c', 'Cat'), member('x', 'scribe', true)]) },
+      pipeline: { heard: new Map([['b', { packets: 120, corrupt: 0, lines: 3 }]]) },
+    }
+    const whoIsHeard = (bot as unknown as { whoIsHeard: (c: unknown) => string[] }).whoIsHeard.bind(bot)
+    expect(whoIsHeard(call)).toEqual(['- Harry: not heard yet', '- Badger: 3 lines', '- Cat: opted out'])
+    await bot.client.destroy()
+  })
 })
