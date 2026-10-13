@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>scribe</title>
+<link rel="stylesheet" href="ui.css">
+<main class="popup">
+  <header><strong>scribe</strong> <span id="state" class="pill">idle</span></header>
+  <p id="title" class="muted"></p>
+  <p id="detail"></p>
+  <p id="error" class="error" hidden></p>
+  <button id="start" class="primary">Transcribe this tab</button>
+  <button id="stop" hidden>Stop</button>
+  <p class="muted small">Tell everyone in the call you are transcribing it. Nothing joins the call:
+    scribe hears this tab and your mic.</p>
+  <footer><a id="open" href="#">Open transcripts</a> · <a id="options" href="#">Settings</a></footer>
+</main>
+<script type="module" src="popup.js"></script>

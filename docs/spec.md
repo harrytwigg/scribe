@@ -240,14 +240,47 @@ reachable while the box is off is H5.
   transcripts and model controls.
 - The same scheme carries over unchanged behind the phase-2 edge.
 
-## 4. Chrome extension (phase 3)
+## 4. Chrome extension: Meet and any browser call, with no bot (phase 3)
 
-MV3 extension: the popup's click triggers `chrome.tabCapture.getMediaStreamId`; an offscreen
-document (`USER_MEDIA`) opens the tab stream and the mic, plays the tab audio back to the user, and
-streams 16 kHz PCM over a WebSocket (`/api/stream`, token-authenticated) with tab and mic on
-separate channels. That labels "me" vs "them" without diarization. The server cuts utterances with
-VAD per channel and feeds them through the same session pipeline. Multiple remote speakers on the
-tab channel would need diarization (pyannote or Sortformer), which is a later addition.
+Nothing joins the call. The extension (`extension/`, MV3, no build step) captures the call tab
+and the user's mic in their own browser and posts utterances to the server like the bot does.
+
+1. A click on **Transcribe this tab** in the popup calls `chrome.tabCapture.getMediaStreamId`.
+   Tab capture is only allowed from such a click.
+2. The background service worker opens an offscreen document (`USER_MEDIA`). The document opens
+   the tab stream and, if allowed, the mic (echo cancellation on), and plays the tab back, because
+   capturing a tab mutes it. It holds the call because a service worker cannot keep a MediaStream
+   and is stopped when idle.
+3. Each stream runs into its own 16 kHz `AudioContext` and an AudioWorklet tap. A per-channel
+   segmenter cuts utterances with the bot's rules: 800 ms silence, 25 s cap, 400 ms minimum. Speech
+   is energy 12 dB above the channel's noise floor, the quietest 20 ms of the last 10 s. The server
+   still runs Silero VAD on every utterance.
+4. Utterances go to `POST /api/sessions/{id}/utterances` with the bot's retry, idempotency key and
+   marker behaviour, in a `browser` session titled after the tab. The tab is speaker `tab`
+   ("Others" by default) and the mic `mic` ("Me"), so "me" vs "them" needs no diarization.
+5. Stop, closing the tab or navigating away ends the call: it waits for the last utterances, then
+   ends the session.
+
+**Why HTTP utterances and not the WebSocket stream planned earlier:** the bot's ingestion path,
+idempotency and retries are reused unchanged, the server gains no streaming code, and it works
+through the phase-2 Caddy edge as it is.
+
+**Auth.** The token is kept in `chrome.storage.local` and sent as a bearer token. Browsers send
+`Origin: chrome-extension://<id>` on the extension's POSTs, which the CSRF check (3.7) would refuse,
+so the server also admits the extension's own origin (`SCRIBE_EXTENSION_ORIGINS`). That origin is
+fixed by the public `key` in the manifest: the unpacked extension has ID
+`mcnpmckibkddnnenfondlblnddldonfm` on every machine. A web page cannot send that origin, and the
+extension still needs the token. Login (the cookie) stays same-origin only.
+
+**Reach.** The host permissions cover `harry-box`, `*.ts.net`, `localhost` and `127.0.0.1`. Any
+other server URL (the phase-2 public domain) is requested as an optional permission when it is
+saved in the settings.
+
+**Limits.** Everyone on the far side of the call is one speaker ("Others"): Meet mixes them into
+the tab's audio. Naming them needs diarization, or reading Meet's active-speaker UI (phase 4).
+Without headphones the mic also hears the call; Chrome's echo cancellation should remove it, but
+that is unverified, and a duplicate "Me" line is the symptom. The mic can be turned off in
+settings.
 
 ## 5. Model options and defaults
 
@@ -267,6 +300,13 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
   into a running server, with a model swap mid-stream; checks attribution and transcripts. This
   proves everything downstream of `receiver.subscribe` (3.2), not Discord receive.
 - **GUI**: driven in a headless browser: sign in, switch model, upload a clip, see the transcript.
+- **Extension** (`node --test`): segmentation, WAV encoding, client retries and markers. With the
+  `extension` marker, pytest loads the unpacked extension in Chromium. It saves settings through
+  the options page, checks that a bad tab stream fails cleanly through the background and offscreen
+  document, and runs the capture code on the reference clip, as the tab (an audio element's stream)
+  and as the mic (Chromium's fake device), into a real server on the GPU. Both channels must come
+  back word-perfect and attributed, in a session that stop then ends. `chrome.tabCapture` itself
+  and the mic permission prompt need a person.
 - **Live Discord** (phase 1, first item): DAVE smoke test in a real voice channel: join with two or
   more people already talking, someone joins mid-call, bot restart mid-session.
 
@@ -277,7 +317,7 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 | 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on harry-box. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | Done |
 | 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on harry-box. Then a soak test; a dedicated Discord application (H1); and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call; the application (H1) |
 | 2 | Public ingress via the tools host + tailnet policy | H3 |
-| 3 | Chrome extension for Meet / any browser call | No on the tailnet; H3 if off it |
+| 3 | Chrome extension for Meet / any browser call (4): built and tested in Chromium; the first real Meet call is the live test | Load it unpacked and try a call; H3 if off the tailnet |
 | 4 | Diarization for single-stream sources, LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
 
 ## 8. Risks
@@ -296,6 +336,8 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
   onnxruntime-gpu 1.24.4 and the pip CUDA libraries together. A future ORT move to CUDA 13 must
   move both.
 - **harry-box availability.** It is off most of the time; see H5.
+- **Extension echo and attribution.** Without headphones, the mic may repeat the call as "Me"
+  lines; all remote speakers share one label (4).
 - **Public exposure (phase 2).** The edge is the only public surface; tailnet policy and the
   server's own auth limit it.
 - **Licences.** Parakeet and Canary are CC-BY-4.0 (attribution), Whisper MIT; fine for personal

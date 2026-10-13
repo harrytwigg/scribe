@@ -198,6 +198,23 @@ def test_cross_origin_writes_refused_even_locally(harness):
     assert c.post("/api/models/alpha/activate", headers={"Origin": "http://testserver"}).status_code == 202
 
 
+def test_extension_origin_allowed_with_token_only(harness):
+    """The Chrome extension's own origin may write (docs/spec.md 4), but still needs the token,
+    and cannot sign in for a cookie."""
+    from scribe_server.auth import Auth
+    from scribe_server.config import EXTENSION_ORIGIN
+
+    harness.services.auth = Auth(TOKEN, extension_origins=(EXTENSION_ORIGIN,))
+    ext = {"Origin": EXTENSION_ORIGIN, **REMOTE}
+    bearer = {"Authorization": f"Bearer {TOKEN}"}
+    c = harness.anonymous
+    assert c.post("/api/sessions", json={"source": "browser"}, headers=ext).status_code == 401
+    assert c.post("/api/sessions", json={"source": "browser"}, headers={**ext, **bearer}).status_code == 201
+    other = {"Origin": "chrome-extension://abcdefghijklmnopabcdefghijklmnop", **REMOTE, **bearer}
+    assert c.post("/api/sessions", json={"source": "browser"}, headers=other).status_code == 403
+    assert c.post("/api/login", json={"token": TOKEN}, headers=ext).status_code == 403
+
+
 def test_marker_lines(harness):
     c = harness.client
     sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]

@@ -40,5 +40,6 @@ packages = ["scribe_server"]
 markers = [
   "gpu: runs real models on the GPU and downloads them (slow)",
   "gui: drives the GUI in Chromium against a real server on the GPU",
+  "extension: loads the Chrome extension in Chromium against a real server on the GPU",
 ]
-addopts = "-m 'not gpu and not gui'"
+addopts = "-m 'not gpu and not gui and not extension'"
