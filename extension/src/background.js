@@ -84,10 +84,13 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   return true
 })
 
-// Capture survives navigation within the tab, so a new page loading there (leaving the call,
-// reloading, going elsewhere) ends the call. Same-page URL changes do not.
-chrome.tabs.onUpdated.addListener(async (tabId, change) => {
-  if (change.status !== 'loading') return
+// Capture survives navigation within the tab, so a new document committing there (leaving the
+// call, reloading, going elsewhere) ends the call. Same-document URL changes (history.pushState,
+// replaceState, #fragment) are not commits, and Meet makes them mid-call (green room to call,
+// dropping query parameters), so they must not end it: tabs.onUpdated reports those as
+// 'loading' too, which is why this listens to webNavigation instead.
+chrome.webNavigation.onCommitted.addListener(async ({ tabId, frameId }) => {
+  if (frameId !== 0) return
   const { capturedTab } = await chrome.storage.session.get('capturedTab')
   if (tabId === capturedTab) serial(stop)
 })

@@ -258,10 +258,12 @@ and the user's mic in their own browser and posts utterances to the server like 
 4. Utterances go to `POST /api/sessions/{id}/utterances` with the bot's retry, idempotency key and
    marker behaviour, in a `browser` session titled after the tab. The tab is speaker `tab`
    ("Others" by default) and the mic `mic` ("Me"), so "me" vs "them" needs no diarization.
-5. A call ends on **Stop**, when the tab closes, when a new page loads in the captured tab (capture
-   itself survives navigation), or after 10 minutes with no transcribed line on either channel
-   (leaving a Meet call can keep the tab open). Ending waits for the last utterances, then ends
-   the session.
+5. A call ends on **Stop**, when the tab closes, when a new document loads in the captured tab
+   (`webNavigation.onCommitted`; capture itself survives navigation), or after 10 minutes with no
+   transcribed line on either channel (leaving a Meet call can keep the tab open). Same-document
+   URL changes (`history.pushState`, `#fragment`) do not end it: Meet makes them mid-call. The
+   idle stop also ends a call after any 10-minute lull (a break, a silent screen-share); the badge
+   clears and the popup says why. Ending waits for the last utterances, then ends the session.
 6. While a call runs, the extension sends a heartbeat every 30 s. The server ends any `browser`
    session that has had no line and no heartbeat for 5 minutes (`SCRIBE_BROWSER_IDLE_SECONDS`),
    because a browser that quits or crashes mid-call never ends its own. Otherwise an orphan would
