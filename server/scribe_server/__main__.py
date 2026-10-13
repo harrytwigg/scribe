@@ -39,6 +39,7 @@ def build(settings: Settings) -> Services:
         audio_dir=settings.data_dir / "audio" if settings.keep_audio else None,
         allowed_hosts=settings.host_allowlist(),
         open_sessions_file=settings.data_dir / "open-sessions",
+        browser_idle_s=settings.browser_idle_s,
     )
     models.restore(settings.default_model)
     return services

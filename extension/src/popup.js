@@ -9,7 +9,9 @@ function render(status = { state: 'idle' }) {
   $('#title').textContent = busy ? status.title ?? '' : ''
   $('#detail').textContent = busy
     ? `${status.lines ?? 0} lines${status.failed ? `, ${status.failed} undelivered` : ''}${status.last ? ` · ${status.last}` : ''}`
-    : ''
+    : status.reason
+      ? `Stopped: ${status.reason}.`
+      : ''
   const problem = status.error ?? (busy ? status.warning : null)
   $('#error').hidden = !problem
   $('#error').textContent = problem ?? ''
@@ -29,7 +31,7 @@ $('#start').addEventListener('click', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
     // Asked for here, in the click: tab capture needs the user to have invoked the extension.
     const tabStreamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id })
-    await send({ type: 'start', tabStreamId, title: tab.title || new URL(tab.url).hostname })
+    await send({ type: 'start', tabStreamId, tabId: tab.id, title: tab.title || new URL(tab.url).hostname })
   } catch (error) {
     render({ state: 'idle', error: error.message })
   } finally {

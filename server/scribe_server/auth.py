@@ -10,7 +10,7 @@
 - Any request carrying an `Origin` that is not this server's own is refused, which stops other web
   pages in the browser from driving the API (CSRF), local or not. The one exception is the scribe
   Chrome extension's own origin (`extension_origins`, docs/spec.md 4): a web page cannot send a
-  `chrome-extension://` origin, and the extension still needs the token.
+  `chrome-extension://` origin, and its requests are authorised like any other (token or cookie).
 """
 
 import hmac

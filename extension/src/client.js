@@ -50,6 +50,11 @@ export class ScribeClient {
     return this.request('POST', '/api/sessions', JSON.stringify({ source: 'browser', title }), 'application/json')
   }
 
+  /** Keeps a quiet call open: the server ends browser sessions it stops hearing from. */
+  heartbeat(id) {
+    return this.request('POST', `/api/sessions/${id}/heartbeat`)
+  }
+
   endSession(id) {
     return this.request('POST', `/api/sessions/${id}/end`)
   }

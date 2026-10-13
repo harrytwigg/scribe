@@ -42,6 +42,7 @@ class Settings:
     trust_localhost: bool = False
     allowed_hosts: tuple[str, ...] = ()
     extension_origins: tuple[str, ...] = (EXTENSION_ORIGIN,)
+    browser_idle_s: float = 300
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -58,6 +59,7 @@ class Settings:
             queue_depth=int(os.environ.get("SCRIBE_QUEUE_DEPTH", "32")),
             trust_localhost=_flag("SCRIBE_TRUST_LOCALHOST"),
             allowed_hosts=tuple(h.strip() for h in os.environ.get("SCRIBE_ALLOWED_HOSTS", "").split(",") if h.strip()),
+            browser_idle_s=float(os.environ.get("SCRIBE_BROWSER_IDLE_SECONDS", "300")),
             extension_origins=tuple(
                 o.strip() for o in os.environ.get("SCRIBE_EXTENSION_ORIGINS", EXTENSION_ORIGIN).split(",") if o.strip()
             ),

@@ -29,9 +29,9 @@ async function streams(tabStreamId, useMic) {
 }
 
 /** Starts a call from the given streams; the e2e test calls this directly with its own. */
-export async function start(config, title, media) {
-  if (call && !call.stopping) throw new Error('already transcribing')
-  call = new Call(config, (status) => report({ ...status, warning: media.warning, server: config.server, title }))
+export async function start(config, title, media, options) {
+  if (call && !call.done) throw new Error(call.stopping ? 'still finishing the last call: try again in a moment' : 'already transcribing')
+  call = new Call(config, (status) => report({ ...status, warning: media.warning, server: config.server, title }), options)
   try {
     await call.start(title, { tab: media.tab, mic: media.mic })
   } catch (error) {
@@ -58,6 +58,10 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
       )
       .then(() => respond({ ok: true }), (error) => respond({ ok: false, error: error.message }))
     return true
+  }
+  if (message.type === 'idle') {
+    respond({ idle: !call || call.done })
+    return
   }
   if (message.type === 'stop') {
     Promise.resolve(stop()).then(() => respond({ ok: true }))

@@ -258,8 +258,15 @@ and the user's mic in their own browser and posts utterances to the server like 
 4. Utterances go to `POST /api/sessions/{id}/utterances` with the bot's retry, idempotency key and
    marker behaviour, in a `browser` session titled after the tab. The tab is speaker `tab`
    ("Others" by default) and the mic `mic` ("Me"), so "me" vs "them" needs no diarization.
-5. Stop, closing the tab or navigating away ends the call: it waits for the last utterances, then
-   ends the session.
+5. A call ends on **Stop**, when the tab closes, when a new page loads in the captured tab (capture
+   itself survives navigation), or after 10 minutes with no transcribed line on either channel
+   (leaving a Meet call can keep the tab open). Ending waits for the last utterances, then ends
+   the session.
+6. While a call runs, the extension sends a heartbeat every 30 s. The server ends any `browser`
+   session that has had no line and no heartbeat for 5 minutes (`SCRIBE_BROWSER_IDLE_SECONDS`),
+   because a browser that quits or crashes mid-call never ends its own. Otherwise an orphan would
+   show as live forever and keep `open-sessions` above zero. A call whose session the server
+   ended (after the laptop slept, say) stops itself at the next heartbeat.
 
 **Why HTTP utterances and not the WebSocket stream planned earlier:** the bot's ingestion path,
 idempotency and retries are reused unchanged, the server gains no streaming code, and it works
@@ -269,8 +276,9 @@ through the phase-2 Caddy edge as it is.
 `Origin: chrome-extension://<id>` on the extension's POSTs, which the CSRF check (3.7) would refuse,
 so the server also admits the extension's own origin (`SCRIBE_EXTENSION_ORIGINS`). That origin is
 fixed by the public `key` in the manifest: the unpacked extension has ID
-`mcnpmckibkddnnenfondlblnddldonfm` on every machine. A web page cannot send that origin, and the
-extension still needs the token. Login (the cookie) stays same-origin only.
+`mcnpmckibkddnnenfondlblnddldonfm` on every machine. A web page cannot send that origin, and
+requests from it still need the token or a signed-in cookie, like any other. Login (getting the
+cookie) stays same-origin only.
 
 **Reach.** The host permissions cover `harry-box`, `*.ts.net`, `localhost` and `127.0.0.1`. Any
 other server URL (the phase-2 public domain) is requested as an optional permission when it is
@@ -278,9 +286,10 @@ saved in the settings.
 
 **Limits.** Everyone on the far side of the call is one speaker ("Others"): Meet mixes them into
 the tab's audio. Naming them needs diarization, or reading Meet's active-speaker UI (phase 4).
-Without headphones the mic also hears the call; Chrome's echo cancellation should remove it, but
-that is unverified, and a duplicate "Me" line is the symptom. The mic can be turned off in
-settings.
+**Use headphones.** Capturing the tab moves the call's playback out of Meet and into the
+extension, so Meet's own echo cancellation may no longer recognise it. On speakers, the others
+could hear themselves echo, and the mic could repeat the call as "Me" lines. Both are unverified;
+the first live call on speakers should ask the far side. The mic can be turned off in settings.
 
 ## 5. Model options and defaults
 
@@ -303,9 +312,10 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 - **Extension** (`node --test`): segmentation, WAV encoding, client retries and markers. With the
   `extension` marker, pytest loads the unpacked extension in Chromium. It saves settings through
   the options page, checks that a bad tab stream fails cleanly through the background and offscreen
-  document, and runs the capture code on the reference clip, as the tab (an audio element's stream)
+  document, clears a stale status, and runs the capture code on the reference clip, as the tab (an audio element's stream)
   and as the mic (Chromium's fake device), into a real server on the GPU. Both channels must come
-  back word-perfect and attributed, in a session that stop then ends. `chrome.tabCapture` itself
+  back word-perfect and attributed, in a session that Stop then ends; a start while it drains is
+  refused. Server tests cover the reaper and heartbeat. `chrome.tabCapture` itself
   and the mic permission prompt need a person.
 - **Live Discord** (phase 1, first item): DAVE smoke test in a real voice channel: join with two or
   more people already talking, someone joins mid-call, bot restart mid-session.
@@ -336,8 +346,9 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
   onnxruntime-gpu 1.24.4 and the pip CUDA libraries together. A future ORT move to CUDA 13 must
   move both.
 - **harry-box availability.** It is off most of the time; see H5.
-- **Extension echo and attribution.** Without headphones, the mic may repeat the call as "Me"
-  lines; all remote speakers share one label (4).
+- **Extension echo and attribution.** On speakers, the far side may hear an echo and the mic may
+  repeat the call as "Me" lines, so use headphones until a live test says otherwise. All remote
+  speakers share one label (4).
 - **Public exposure (phase 2).** The edge is the only public surface; tailnet policy and the
   server's own auth limit it.
 - **Licences.** Parakeet and Canary are CC-BY-4.0 (attribution), Whisper MIT; fine for personal

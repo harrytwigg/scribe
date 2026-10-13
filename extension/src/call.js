@@ -1,15 +1,18 @@
 // One transcribed call: the tab's audio ("them") and the mic ("me") as two channels, each cut into
 // utterances and posted to the scribe server (docs/spec.md, 4). Runs in the offscreen document.
 
-import { ScribeClient } from './client.js'
+import { ScribeClient, ServerError } from './client.js'
 import { RATE, Segmenter } from './segmenter.js'
+
+const HEARTBEAT_MS = 30_000
 
 export class Call {
   /**
    * @param {{server: string, token: string, myName: string, othersName: string}} config
    * @param {(status: object) => void} report
    */
-  constructor(config, report) {
+  constructor(config, report, { idleStopMs = 10 * 60_000 } = {}) {
+    this.idleStopMs = idleStopMs
     this.config = config
     this.report = report
     this.client = new ScribeClient(config.server, config.token)
@@ -19,6 +22,7 @@ export class Call {
     this.failed = 0
     this.sessionId = null
     this.stopping = null
+    this.done = false // fully stopped: session ended, nothing left in flight
   }
 
   /**
@@ -27,7 +31,13 @@ export class Call {
    */
   async start(title, streams) {
     this.streams = streams
-    const session = await this.client.createSession(title)
+    let session
+    try {
+      session = await this.client.createSession(title)
+    } catch (error) {
+      this.done = true
+      throw error
+    }
     this.sessionId = session.id
     try {
       await this.capture(streams)
@@ -36,8 +46,30 @@ export class Call {
       await this.stop()
       throw error
     }
+    this.heard = Date.now()
+    this.timer = setInterval(() => this.tick(), HEARTBEAT_MS)
     this.publish('recording')
     return session
+  }
+
+  /**
+   * Every 30 s: tell the server the call is alive, and give up on one that is over. Leaving a Meet
+   * call can keep the tab (and its capture) open, so a long silence on every channel ends it.
+   */
+  async tick() {
+    if (this.stopping) return
+    if (Date.now() - this.heard > this.idleStopMs) {
+      this.reason = `no speech for ${Math.round(this.idleStopMs / 60_000)} min`
+      return this.stop()
+    }
+    try {
+      await this.client.heartbeat(this.sessionId)
+    } catch (error) {
+      if (error instanceof ServerError && (error.status === 404 || error.status === 409)) {
+        this.reason = 'the server ended the session'
+        this.stop()
+      }
+    }
   }
 
   async capture(streams) {
@@ -47,7 +79,8 @@ export class Call {
     this.contexts.push(playback)
     await this.channel(streams.tab, { id: 'tab', name: this.config.othersName })
     if (streams.mic) await this.channel(streams.mic, { id: 'mic', name: this.config.myName })
-    // The tab closing or navigating away ends its track, and with it the call.
+    // The tab closing ends its track, and with it the call. (Navigating does not: the background
+    // stops the call when the captured tab loads a new page.)
     for (const track of streams.tab.getAudioTracks()) track.addEventListener('ended', () => this.stop())
   }
 
@@ -72,6 +105,7 @@ export class Call {
   post(speaker, samples, startedAt) {
     const job = this.client.postUtterance(this.sessionId, speaker, samples, startedAt).then((result) => {
       if (result.ok && result.text) {
+        this.heard = Date.now()
         this.lines++
         this.last = `${speaker.name}: ${result.text}`
       } else if (!result.ok) {
@@ -85,12 +119,21 @@ export class Call {
   }
 
   publish(state) {
-    this.report({ state, sessionId: this.sessionId, lines: this.lines, failed: this.failed, last: this.last, error: this.error })
+    this.report({
+      state,
+      sessionId: this.sessionId,
+      lines: this.lines,
+      failed: this.failed,
+      last: this.last,
+      error: this.error,
+      reason: this.reason,
+    })
   }
 
   /** Stop capturing, wait for every utterance to land, then end the session. */
   stop() {
     this.stopping ??= (async () => {
+      clearInterval(this.timer)
       this.publish('stopping')
       for (const stream of Object.values(this.streams ?? {})) stream?.getTracks().forEach((track) => track.stop())
       await Promise.all(this.contexts.map((context) => context.close().catch(() => {})))
@@ -100,6 +143,7 @@ export class Call {
       for (const segmenter of this.segmenters ?? []) segmenter.flush()
       await Promise.allSettled([...this.inflight])
       if (this.sessionId) await this.client.endSession(this.sessionId).catch((error) => (this.error = error.message))
+      this.done = true
       this.publish('stopped')
     })()
     return this.stopping

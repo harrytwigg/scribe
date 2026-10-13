@@ -215,6 +215,30 @@ def test_extension_origin_allowed_with_token_only(harness):
     assert c.post("/api/login", json={"token": TOKEN}, headers=ext).status_code == 403
 
 
+def test_abandoned_browser_sessions_are_ended(harness, monkeypatch):
+    """A browser that quits mid-call never ends its session; the server does, once it has seen
+    no line and no heartbeat for `browser_idle_s` (300 s). Discord sessions are the bot's to end."""
+    import asyncio
+
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    c = harness.client
+    reap = lambda now: asyncio.run(harness.app.state.reap_idle(now))  # noqa: E731
+    quiet = c.post("/api/sessions", json={"source": "browser"}).json()["id"]
+    alive = c.post("/api/sessions", json={"source": "browser"}).json()["id"]
+    discord = c.post("/api/sessions", json={"source": "discord"}).json()["id"]
+    clock[0] = 1250.0
+    assert c.post(f"/api/sessions/{alive}/heartbeat").status_code == 200
+
+    assert reap(1299.0) == []
+    assert reap(1301.0) == [quiet]
+    assert c.get(f"/api/sessions/{quiet}").json()["ended_at"] is not None
+    assert c.post(f"/api/sessions/{quiet}/heartbeat").status_code == 409
+    assert c.get("/api/status").json()["open_sessions"] == 2
+    assert reap(1551.0) == [alive]
+    assert c.get(f"/api/sessions/{discord}").json()["ended_at"] is None
+
+
 def test_marker_lines(harness):
     c = harness.client
     sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]

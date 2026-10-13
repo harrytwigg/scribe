@@ -27,10 +27,11 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 2. In the extension's **Settings**: the server (`http://harry-box:8787`), the API token and your
    name. Press **Allow microphone** once.
 3. In the Meet tab, click the scribe icon, then **Transcribe this tab**. Lines from the call
-   ("Others") and your mic (your name) appear under **Live** in the GUI. **Stop**, or closing the
-   tab, ends it.
+   ("Others") and your mic (your name) appear under **Live** in the GUI. **Stop**, closing or
+   leaving the tab, or 10 minutes with no speech ends it.
 
-Tell people you are transcribing: unlike the Discord bot, nothing in the call announces it.
+Use headphones: on speakers, the others may hear themselves echo. Tell people you are
+transcribing: unlike the Discord bot, nothing in the call announces it.
 
 ## Developing
 

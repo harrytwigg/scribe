@@ -96,6 +96,9 @@ class Store:
     def count_open_sessions(self) -> int:
         return self._one("select count(*) as n from sessions where ended_at is null")["n"]
 
+    def open_sessions(self, source: str) -> list[dict]:
+        return self._all("select * from sessions where ended_at is null and source = ?", source)
+
     def end_session(self, session_id: str) -> None:
         self._exec("update sessions set ended_at = ? where id = ? and ended_at is null", time.time(), session_id)
 

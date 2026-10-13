@@ -132,6 +132,12 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         assert result["ok"] is False and result["error"], result
         assert worker.evaluate("chrome.storage.session.get('status')")["status"]["state"] == "stopped"
         assert api.get("/api/status").json()["open_sessions"] == 0
+        assert worker.evaluate("chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })") == []
+
+        # A status left saying "recording" by a document that died is cleared by Stop.
+        worker.evaluate("chrome.storage.session.set({ status: { state: 'recording', lines: 3 } })")
+        assert popup.evaluate("chrome.runtime.sendMessage({ type: 'stop' })")["ok"] is True
+        assert worker.evaluate("chrome.storage.session.get('status')")["status"]["state"] == "stopped"
 
         page = context.new_page()
         logs = []
@@ -164,9 +170,20 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         popup.screenshot(path=str(SHOTS / "01-popup-recording.png"))
         assert session["ended_at"] is None and session["title"] == "Meet - abc-defg-hij"
 
-        page.evaluate("globalThis.scribe.stop()")
+        # While the call drains, a new start is refused rather than racing it.
+        refused = page.evaluate(
+            """async ([config]) => {
+                const stopping = globalThis.scribe.stop()
+                const error = await globalThis.scribe.start(config, 'again', { tab: null, mic: null }).then(() => null, (e) => e.message)
+                await stopping
+                return error
+            }""",
+            [config],
+        )
+        assert refused == "still finishing the last call: try again in a moment"
         session, got = lines()
         assert session["ended_at"] is not None, "stopping ends the session"
+        assert api.get("/api/status").json()["open_sessions"] == 0
         popup.wait_for_function("document.querySelector('#state').textContent === 'stopped'")
         context.close()
 
