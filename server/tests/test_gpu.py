@@ -39,7 +39,8 @@ def client(tmp_path_factory):
         device="cuda", keep_audio=False, default_model="", queue_depth=32,
     )
     services = build(settings)
-    yield TestClient(create_app(services)), services
+    # The host allowlist (DNS-rebinding guard) admits localhost, not TestClient's "testserver".
+    yield TestClient(create_app(services), base_url="http://localhost"), services
     services.worker.stop()
 
 

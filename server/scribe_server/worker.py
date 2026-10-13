@@ -17,9 +17,10 @@ class QueueFull(Exception):
 
 
 class GpuWorker:
-    def __init__(self, depth: int = 32):
+    def __init__(self, depth: int = 32, name: str = "gpu-worker", label: str = "transcription"):
+        self._label = label
         self._queue: queue.Queue[tuple[Callable[[], Any], Future] | None] = queue.Queue(maxsize=depth)
-        self._thread = threading.Thread(target=self._run, name="gpu-worker", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
     def _run(self) -> None:
@@ -37,7 +38,7 @@ class GpuWorker:
         try:
             self._queue.put_nowait((fn, future))
         except queue.Full:
-            raise QueueFull("transcription queue is full") from None
+            raise QueueFull(f"{self._label} queue is full") from None
         return future
 
     async def run(self, fn: Callable[[], Any]) -> Any:

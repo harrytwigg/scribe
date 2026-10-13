@@ -43,6 +43,8 @@ class Settings:
     allowed_hosts: tuple[str, ...] = ()
     extension_origins: tuple[str, ...] = (EXTENSION_ORIGIN,)
     browser_idle_s: float = 300
+    diarization: bool = True
+    diarization_threads: int = 8
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -59,6 +61,8 @@ class Settings:
             queue_depth=int(os.environ.get("SCRIBE_QUEUE_DEPTH", "32")),
             trust_localhost=_flag("SCRIBE_TRUST_LOCALHOST"),
             allowed_hosts=tuple(h.strip() for h in os.environ.get("SCRIBE_ALLOWED_HOSTS", "").split(",") if h.strip()),
+            diarization=_flag("SCRIBE_DIARIZATION", True),
+            diarization_threads=int(os.environ.get("SCRIBE_DIARIZATION_THREADS", "8")),
             browser_idle_s=float(os.environ.get("SCRIBE_BROWSER_IDLE_SECONDS", "300")),
             extension_origins=tuple(
                 o.strip() for o in os.environ.get("SCRIBE_EXTENSION_ORIGINS", EXTENSION_ORIGIN).split(",") if o.strip()

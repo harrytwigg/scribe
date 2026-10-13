@@ -20,11 +20,23 @@ test('a busy server is retried with the same key, then succeeds', async () => {
   const server = fakeServer([[503, { detail: 'busy' }], [201, { text: 'hello' }]])
   const client = new ScribeClient('http://box:8787', 'tok', { retryDelaysMs: [1, 1], fetch: server.fetch })
   const result = await client.postUtterance('s1', speaker, new Float32Array(1600), 100.5)
-  assert.deepEqual(result, { ok: true, text: 'hello', skipped: undefined })
+  assert.deepEqual(result, { ok: true, text: 'hello', skipped: undefined, lines: [{ text: 'hello' }] })
   const keys = server.calls.map((call) => call.init.body.get('client_key'))
   assert.deepEqual(keys, ['tab:100.5', 'tab:100.5'])
   assert.equal(server.calls[0].init.headers.Authorization, 'Bearer tok')
   assert.equal(server.calls[0].url, 'http://box:8787/api/sessions/s1/utterances')
+})
+
+test('a mixed channel asks for diarization and gets every line back', async () => {
+  const lines = [{ speaker_name: 'Speaker 1', text: 'hi' }, { speaker_name: 'Speaker 2', text: 'hello' }]
+  const server = fakeServer([[201, { text: 'hi hello', lines }]])
+  const client = new ScribeClient('http://box:8787', 'tok', { fetch: server.fetch })
+  const result = await client.postUtterance('s1', { ...speaker, diarize: true }, new Float32Array(1600), 1)
+  assert.equal(server.calls[0].init.body.get('diarize'), 'true')
+  assert.deepEqual(result.lines, lines)
+  const plain = fakeServer([[201, { text: 'x' }]])
+  await new ScribeClient('http://box:8787', 'tok', { fetch: plain.fetch }).postUtterance('s1', speaker, new Float32Array(1600), 1)
+  assert.equal(plain.calls[0].init.body.get('diarize'), null)
 })
 
 test('giving up leaves a marker line', async () => {

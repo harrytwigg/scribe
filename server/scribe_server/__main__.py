@@ -11,6 +11,7 @@ from .app import Services, create_app
 from .auth import Auth
 from .catalogue import CATALOGUE
 from .config import Settings
+from .diarize import Diarizer, DiarizerSlot
 from .models import ModelManager
 from .store import Store
 from .worker import GpuWorker
@@ -41,6 +42,9 @@ def build(settings: Settings) -> Services:
         open_sessions_file=settings.data_dir / "open-sessions",
         browser_idle_s=settings.browser_idle_s,
     )
+    if settings.diarization:
+        services.diarization = DiarizerSlot()
+        services.diarization.load(partial(Diarizer, settings.models_dir, settings.diarization_threads))
     models.restore(settings.default_model)
     return services
 

@@ -17,6 +17,8 @@ dependencies = [
   # (docs/spec.md, section 2). CTranslate2 needs the same CUDA 12 / cuDNN 9 libraries.
   "onnxruntime-gpu[cuda,cudnn]==1.24.4",
   "nvidia-cublas-cu12",
+  "sherpa-onnx==1.13.8",
+  "sherpa-onnx-core==1.13.8",
 ]
 
 [dependency-groups]

@@ -1,0 +1,66 @@
+[
+ {
+  "speaker": "A",
+  "librispeech_speaker": 1320,
+  "id": "1320-122612-0004",
+  "start": 0.0,
+  "end": 6.42,
+  "text": "DISTRUSTING HIS OWN JUDGMENT HIS APPEALS TO THE OPINION OF CHINGACHGOOK WERE FREQUENT AND EARNEST"
+ },
+ {
+  "speaker": "B",
+  "librispeech_speaker": 2961,
+  "id": "2961-961-0000",
+  "start": 6.72,
+  "end": 11.39,
+  "text": "SOCRATES BEGINS THE TIMAEUS WITH A SUMMARY OF THE REPUBLIC"
+ },
+ {
+  "speaker": "A",
+  "librispeech_speaker": 1320,
+  "id": "1320-122612-0005",
+  "start": 11.69,
+  "end": 17.61,
+  "text": "YET HERE ARE WE WITHIN A SHORT RANGE OF THE SCAROONS AND NOT A SIGN OF A TRAIL HAVE WE CROSSED"
+ },
+ {
+  "speaker": "C",
+  "librispeech_speaker": 7127,
+  "id": "7127-75946-0003",
+  "start": 17.91,
+  "end": 22.71,
+  "text": "GENTLEMEN TO YOUR POSTS WHEREUPON SAINT AIGNAN AND VILLEROY TOOK THEIR LEAVE"
+ },
+ {
+  "speaker": "B",
+  "librispeech_speaker": 2961,
+  "id": "2961-961-0003",
+  "start": 23.02,
+  "end": 27.75,
+  "text": "I WILL IF TIMAEUS APPROVES I APPROVE"
+ },
+ {
+  "speaker": "C",
+  "librispeech_speaker": 7127,
+  "id": "7127-75946-0004",
+  "start": 28.05,
+  "end": 32.54,
+  "text": "CERTAINLY SIRE BUT I MUST HAVE MONEY TO DO THAT WHAT"
+ },
+ {
+  "speaker": "A",
+  "librispeech_speaker": 1320,
+  "id": "1320-122612-0006",
+  "start": 32.84,
+  "end": 37.68,
+  "text": "LET US RETRACE OUR STEPS AND EXAMINE AS WE GO WITH KEENER EYES"
+ },
+ {
+  "speaker": "B",
+  "librispeech_speaker": 2961,
+  "id": "2961-961-0005",
+  "start": 37.98,
+  "end": 41.76,
+  "text": "SOME POEMS OF SOLON WERE RECITED BY THE BOYS"
+ }
+]

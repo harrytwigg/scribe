@@ -8,7 +8,7 @@ const HEARTBEAT_MS = 30_000
 
 export class Call {
   /**
-   * @param {{server: string, token: string, myName: string, othersName: string}} config
+   * @param {{server: string, token: string, myName: string, othersName: string, separateSpeakers?: boolean}} config
    * @param {(status: object) => void} report
    */
   constructor(config, report, { idleStopMs = 10 * 60_000 } = {}) {
@@ -77,7 +77,7 @@ export class Call {
     const playback = new AudioContext()
     playback.createMediaStreamSource(streams.tab).connect(playback.destination)
     this.contexts.push(playback)
-    await this.channel(streams.tab, { id: 'tab', name: this.config.othersName })
+    await this.channel(streams.tab, { id: 'tab', name: this.config.othersName, diarize: this.config.separateSpeakers !== false })
     if (streams.mic) await this.channel(streams.mic, { id: 'mic', name: this.config.myName })
     // The tab closing ends its track, and with it the call. (Navigating does not: the background
     // stops the call when the captured tab loads a new page.)
@@ -106,8 +106,9 @@ export class Call {
     const job = this.client.postUtterance(this.sessionId, speaker, samples, startedAt).then((result) => {
       if (result.ok && result.text) {
         this.heard = Date.now()
-        this.lines++
-        this.last = `${speaker.name}: ${result.text}`
+        this.lines += result.lines.length || 1
+        const line = result.lines.at(-1)
+        this.last = `${line?.speaker_name ?? speaker.name}: ${line?.text ?? result.text}`
       } else if (!result.ok) {
         this.failed++
         this.error = result.error

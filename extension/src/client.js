@@ -85,9 +85,11 @@ export class ScribeClient {
       form.append('speaker_name', speaker.name)
       form.append('started_at', String(startedAt))
       form.append('client_key', key)
+      // A channel carrying several voices (the call tab) is split into speakers on the server.
+      if (speaker.diarize) form.append('diarize', 'true')
       try {
         const result = await this.request('POST', `/api/sessions/${sessionId}/utterances`, form)
-        return { ok: true, text: result.text, skipped: result.skipped }
+        return { ok: true, text: result.text, skipped: result.skipped, lines: result.lines ?? (result.text ? [result] : []) }
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error)
         const retryable = !(error instanceof ServerError) || RETRYABLE.has(error.status)

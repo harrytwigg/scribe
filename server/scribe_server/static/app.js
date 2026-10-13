@@ -78,6 +78,7 @@ async function refreshStatus() {
   if (status.loading_model) parts.push(`loading ${status.loading_model}…`);
   if (status.open_sessions) parts.push(`${status.open_sessions} live`);
   if (status.queue_depth) parts.push(`${status.queue_depth} queued`);
+  if (status.diarization && status.diarization !== 'ready' && status.diarization !== 'off') parts.push(`speaker separation ${status.diarization}`);
   $('#status').textContent = parts.join(' · ');
 }
 
@@ -130,9 +131,34 @@ async function refreshModels() {
 
 // ---- transcripts -----------------------------------------------------------------------------
 
+// A steady colour per speaker, so a call reads at a glance.
+// The golden angle spreads neighbours ("Speaker 1", "Speaker 2") far apart on the wheel.
+const hue = (id) => Math.round(([...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 9973, 7) * 137.508) % 360);
+
+// Click a name to rename that speaker for the whole session (past and future lines).
+async function renameSpeaker(session, u, current) {
+  const name = prompt(`Rename ${current} in this session:`, current);
+  if (!name?.trim() || name.trim() === current) return;
+  try {
+    await api(`/api/sessions/${session.id}/speakers/${encodeURIComponent(u.speaker_id)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
+    });
+    showSpeakerName(u.speaker_id, name.trim());
+  } catch (error) { if (!(error instanceof Unauthorised)) alert(error.message); }
+}
+
+function showSpeakerName(speakerId, name) {
+  for (const node of document.querySelectorAll('.who')) {
+    if (node.dataset.speaker === speakerId) { node.textContent = name; node.title = `${name} (click to rename)`; }
+  }
+}
+
 const lineNode = (session, u) => el('div', { class: 'line' },
   el('time', {}, clock(u.started_at - session.started_at)),
-  el('span', { class: 'who', title: u.speaker_name }, u.speaker_name),
+  el('button', {
+    class: 'who', type: 'button', title: `${u.speaker_name} (click to rename)`, 'data-speaker': u.speaker_id,
+    style: `--hue:${hue(u.speaker_id)}`, onclick: (event) => renameSpeaker(session, u, event.currentTarget.textContent),
+  }, u.speaker_name),
   el('p', { style: 'margin:0' }, u.text));
 
 // ---- live ------------------------------------------------------------------------------------
@@ -161,6 +187,10 @@ async function openLive(id) {
   liveSource.addEventListener('line', (event) => {
     box.append(lineNode(session, JSON.parse(event.data)));
     box.lastElementChild.scrollIntoView({ block: 'nearest' });
+  });
+  liveSource.addEventListener('speaker', (event) => {
+    const { speaker_id, name } = JSON.parse(event.data);
+    showSpeakerName(speaker_id, name);
   });
   liveSource.addEventListener('end', () => { liveSource.close(); box.append(el('p', { class: 'hint' }, 'Session ended.')); liveSession = null; });
   refreshLive();
@@ -201,12 +231,25 @@ async function transcribeBlob(blob, name) {
   const form = new FormData();
   form.append('file', blob, name);
   form.append('response_format', 'verbose_json');
+  const speakers = $('#try-speakers').checked;
+  if (speakers) form.append('diarize', 'true');
   try {
     const r = await api('/v1/audio/transcriptions', { method: 'POST', body: form });
     const model = models.find((m) => m.id === r.model)?.name ?? r.model ?? 'no model';
-    result.replaceChildren(
-      el('p', { class: 'meta' }, `${model} · ${r.duration.toFixed(1)} s of audio in ${(r.asr_ms / 1000).toFixed(2)} s`),
-      el('p', { id: 'try-text' }, r.text || '(no speech)'));
+    const meta = `${model} · ${r.duration.toFixed(1)} s of audio in ${(r.asr_ms / 1000).toFixed(2)} s`;
+    if (r.segments) {
+      result.replaceChildren(
+        el('p', { class: 'meta' }, `${meta} · ${r.speakers} speaker${r.speakers === 1 ? '' : 's'}`),
+        el('div', { id: 'try-text', class: 'transcript' }, r.segments.length ? r.segments.map((seg) => el('div', { class: 'line' },
+          el('time', {}, clock(seg.start)),
+          el('span', { class: 'who', style: `--hue:${hue(seg.speaker)}` }, seg.speaker),
+          el('p', { style: 'margin:0' }, seg.text))) : '(no speech)'));
+    } else {
+      result.replaceChildren(
+        speakers ? el('p', { class: 'hint' }, 'Speaker separation is not ready yet: transcribed as one speaker.') : '',
+        el('p', { class: 'meta' }, meta),
+        el('p', { id: 'try-text' }, r.text || '(no speech)'));
+    }
   } catch (error) { if (!(error instanceof Unauthorised)) result.replaceChildren(el('p', { class: 'error' }, error.message)); }
 }
 
