@@ -48,3 +48,4 @@ tests/test_extension.py [
 # negative check: SCRIBE_EXTENSION_ORIGINS="" -> the same run fails with: ServerError: cross-origin request refused
 # reaper live under uvicorn: SCRIBE_BROWSER_IDLE_SECONDS=1, one browser session -> ended by the 60 s loop (log: 'ended 1 abandoned browser session(s)'), open-sessions file 1 -> 0
 # deployed harry-box server: POST /api/sessions with the extension's Origin -> 201; another extension ID -> 403
+# navigation (round 3): pushState/replaceState/#hash in the captured tab keep the call; reload ends it. Same e2e run against the old tabs.onUpdated listener fails: "a same-document URL change ended the call"

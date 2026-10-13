@@ -137,6 +137,28 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         assert api.get("/api/status").json()["open_sessions"] == 0
         assert worker.evaluate("chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })") == []
 
+        # The captured tab: Meet rewrites its URL mid-call (history.pushState, #fragment), which must
+        # not end the call; a new document loading in the tab (reload, leaving) must.
+        call_tab = context.new_page()
+        call_tab.goto(server + "/")
+        tab_id = worker.evaluate(f"chrome.tabs.query({{ url: '{server}/*' }}).then((tabs) => tabs[0].id)")
+        worker.evaluate(
+            "id => chrome.storage.session.set({ capturedTab: id, status: { state: 'recording', lines: 1 } })", tab_id
+        )
+        state = lambda: worker.evaluate("chrome.storage.session.get('status')")["status"]["state"]  # noqa: E731
+        call_tab.evaluate("history.pushState({}, '', '/abc-defg-hij?authuser=0')")
+        call_tab.evaluate("history.replaceState({}, '', '/abc-defg-hij')")
+        call_tab.evaluate("location.hash = 'joined'")
+        time.sleep(1.5)
+        assert state() == "recording", "a same-document URL change ended the call"
+        call_tab.reload()
+        for _ in range(50):
+            if state() == "stopped":
+                break
+            time.sleep(0.1)
+        assert state() == "stopped", "a new document in the captured tab did not end the call"
+        call_tab.close()
+
         # A status left saying "recording" by a document that died is cleared by Stop.
         worker.evaluate("chrome.storage.session.set({ status: { state: 'recording', lines: 3 } })")
         assert popup.evaluate("chrome.runtime.sendMessage({ type: 'stop' })")["ok"] is True
