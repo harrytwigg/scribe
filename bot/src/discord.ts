@@ -323,7 +323,9 @@ export class ScribeBot {
         const heard = call.pipeline.heard.get(member.id)
         if (this.optedOut.has(member.id)) return `- ${member.displayName}: opted out`
         if (!heard?.packets) return `- ${member.displayName}: not heard yet`
-        return `- ${member.displayName}: ${heard.lines} line${heard.lines === 1 ? '' : 's'}`
+        if (heard.corrupt === heard.packets) return `- ${member.displayName}: audio arriving but not decodable`
+        const skipped = heard.corrupt ? ` (${heard.corrupt} packets not decodable)` : ''
+        return `- ${member.displayName}: ${heard.lines} line${heard.lines === 1 ? '' : 's'}${skipped}`
       })
   }
 

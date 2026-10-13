@@ -89,11 +89,21 @@ describe('ScribeBot', () => {
     ;(bot as unknown as { optedOut: Set<string> }).optedOut = new Set(['c'])
     const member = (id: string, displayName: string, bot = false) => [id, { id, displayName, user: { bot } }] as const
     const call = {
-      channel: { members: new Collection([member('a', 'Harry'), member('b', 'Badger'), member('c', 'Cat'), member('x', 'scribe', true)]) },
-      pipeline: { heard: new Map([['b', { packets: 120, corrupt: 0, lines: 3 }]]) },
+      channel: { members: new Collection([member('a', 'Harry'), member('b', 'Badger'), member('c', 'Cat'), member('d', 'Dee'), member('x', 'scribe', true)]) },
+      pipeline: {
+        heard: new Map([
+          ['b', { packets: 120, corrupt: 4, lines: 3 }],
+          ['d', { packets: 50, corrupt: 50, lines: 0 }],
+        ]),
+      },
     }
     const whoIsHeard = (bot as unknown as { whoIsHeard: (c: unknown) => string[] }).whoIsHeard.bind(bot)
-    expect(whoIsHeard(call)).toEqual(['- Harry: not heard yet', '- Badger: 3 lines', '- Cat: opted out'])
+    expect(whoIsHeard(call)).toEqual([
+      '- Harry: not heard yet',
+      '- Badger: 3 lines (4 packets not decodable)',
+      '- Cat: opted out',
+      '- Dee: audio arriving but not decodable',
+    ])
     await bot.client.destroy()
   })
 })

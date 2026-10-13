@@ -80,8 +80,8 @@ describe('Pipeline with a replayed call', () => {
 
 describe('Pipeline with undecodable packets', () => {
   it('keeps hearing a speaker whose first packet cannot be decoded', async () => {
-    // LON-49: one bad packet as the bot joined destroyed that user's decoder, and they were never
-    // heard again for the rest of the call, while everyone else was.
+    // One bad packet as the bot joined used to destroy that user's decoder: they were never heard
+    // again for the rest of the call, while everyone else was.
     const source = new ReplaySource(
       [
         { userId: 'harry', pcm: tone(2000, 300), atMs: 0, corruptFirst: 1 },
@@ -122,6 +122,37 @@ describe('Pipeline with undecodable packets', () => {
     await source.play()
     await pipeline.stop()
     expect(client.posts.map((p) => Math.round(p.ms / 100) * 100)).toEqual([1000])
+  })
+})
+
+describe('Pipeline with frames it cannot decrypt', () => {
+  it('never decodes DAVE-encrypted frames, and keeps hearing everyone', async () => {
+    // 10 s of frames still encrypted (the bot joined before it could decrypt this speaker). Half
+    // of them decode as noise, which would be posted as speech, and decoding enough of them
+    // corrupts the heap every decoder shares, silencing everyone else too.
+    const source = new ReplaySource(
+      [
+        { userId: 'harry', pcm: tone(1000, 300), atMs: 0, encryptedFirst: 500 },
+        { userId: 'badger', pcm: tone(2000, 500), atMs: 11_000 },
+        { userId: 'harry', pcm: tone(1500, 300), atMs: 14_000 },
+      ],
+      20,
+    )
+    const client = new RecordingClient()
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: () => false,
+    })
+    await source.play()
+    await pipeline.stop()
+    const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
+    // Only the real speech: none of the encrypted frames became audio.
+    expect(byUser('harry')).toEqual([1000, 1500])
+    expect(byUser('badger')).toEqual([2000])
+    expect(pipeline.heard.get('harry')?.corrupt).toBe(500)
   })
 })
 

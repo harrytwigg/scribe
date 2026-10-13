@@ -10,6 +10,18 @@ import type { VoiceSource } from './voice-source.js'
 
 export const SILENCE_MS = 800
 
+/**
+ * True for a DAVE end-to-end encrypted frame: every one ends in the protocol's magic marker
+ * 0xFAFA. @discordjs/voice hands such a frame through still encrypted when it cannot decrypt it
+ * yet (just after joining, or mid key change). It must never reach the decoder: about half of
+ * them "decode" as noise, which would be posted as the user's speech, and decoding many of them
+ * corrupts opusscript's heap, which every decoder in the process shares. A real Opus frame ends
+ * in 0xFAFA once in 65536, so a false match costs one 20 ms frame.
+ */
+export function isEncryptedFrame(packet: Buffer): boolean {
+  return packet.length >= 2 && packet[packet.length - 2] === 0xfa && packet[packet.length - 1] === 0xfa
+}
+
 export interface PipelineOptions {
   source: VoiceSource
   client: ScribeClient
@@ -24,7 +36,7 @@ export interface PipelineOptions {
 /** What has been heard from one user this call, for `/scribe status` and the end-of-call log. */
 export interface Heard {
   packets: number
-  /** Packets that would not decode: a DAVE frame before the session can decrypt it, or damage. */
+  /** Packets that could not be used: still DAVE-encrypted, or not valid Opus. */
   corrupt: number
   /** Lines the server transcribed (utterances it found no speech in are not counted). */
   lines: number
@@ -65,33 +77,57 @@ export class Pipeline {
     // Each packet is decoded on its own, so a bad one costs that packet only. A stream decoder
     // (prism's Transform) is destroyed by its first bad packet and then silently stops the user
     // being heard for the rest of the call: the bug that lost a whole speaker (docs/spec.md, 3.2).
-    const decoder = new OpusScript(48_000, 2, OpusScript.Application.AUDIO)
+    let decoder: OpusScript
+    try {
+      decoder = new OpusScript(48_000, 2, OpusScript.Application.AUDIO)
+    } catch (error) {
+      onError?.(error)
+      opus.destroy()
+      return
+    }
     this.active.set(userId, { segmenter, opus })
     let corrupt = 0
     let finished = false
     const finish = () => {
       if (finished) return
       finished = true
-      decoder.delete()
+      // Release the user first: nothing below may stop them being heard next time.
+      if (this.active.get(userId)?.opus === opus) {
+        this.active.delete(userId)
+        segmenter.flush()
+      }
+      try {
+        decoder.delete()
+      } catch (error) {
+        onError?.(error)
+      }
       if (corrupt) {
         void speakerPromise
           .then((speaker) => onError?.(new Error(`skipped ${corrupt} undecodable packet(s) from ${speaker.name}`)))
           .catch(() => {})
       }
-      // Dropped (opt-out) or stopped streams are already out of `active`, and must not flush here.
-      if (this.active.get(userId)?.opus !== opus) return
-      this.active.delete(userId)
-      segmenter.flush()
     }
     opus.on('data', (packet: Buffer) => {
       if (finished) return
       heard.packets++
+      if (isEncryptedFrame(packet)) {
+        corrupt++
+        heard.corrupt++
+        return
+      }
       let pcm: Buffer
       try {
         pcm = decoder.decode(packet)
-      } catch {
-        corrupt++
-        heard.corrupt++
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('Decode error')) {
+          corrupt++
+          heard.corrupt++
+          return
+        }
+        // Anything else is the decoder itself failing, not the packet: end this stream (the user
+        // is heard again on their next speaking event, with a new decoder) and say so.
+        onError?.(error)
+        opus.destroy()
         return
       }
       segmenter.push(pcm)
