@@ -147,3 +147,182 @@ def test_diarized_upload(tmp_path):
     assert [seg["speaker"] for seg in r["segments"]] == ["Speaker 1", "Speaker 2", "Speaker 1"]
     assert r["speakers"] == 2
     assert r["text"].splitlines()[1].startswith("Speaker 2: alpha:")
+
+
+# -- review round 1 ---------------------------------------------------------------------------
+
+import random  # noqa: E402
+import threading  # noqa: E402
+
+from scribe_server.diarize import Diarizer, Speaker, untangle  # noqa: E402
+from scribe_server.worker import QueueFull  # noqa: E402
+
+
+def spans(turns):
+    return [(round(t.start, 2), round(t.end, 2), t.label) for t in turns]
+
+
+def test_tidy_survives_overlapping_slivers():
+    # Used to raise IndexError: a leading sliver folded into a "next" turn that did not exist.
+    assert spans(tidy([Turn(0, 0.3, 0), Turn(0.1, 0.4, 1)])) == [(0, 0.4, 1)]
+    assert spans(tidy([Turn(0, 0.2, 0)])) == [(0, 0.2, 0)]
+    assert tidy([]) == []
+
+
+def test_tidy_fuzz():
+    rng = random.Random(7)
+    for _ in range(20_000):
+        turns = []
+        for _ in range(rng.randint(0, 6)):
+            a = rng.uniform(0, 10)
+            turns.append(Turn(a, a + rng.choice([rng.uniform(0, 0.6), rng.uniform(0, 4)]), rng.randint(0, 2)))
+        out = tidy(turns)
+        for t in out:
+            assert t.end > t.start
+        for a, b in zip(out, out[1:]):
+            assert a.end <= b.start + 1e-9, (turns, out)  # ordered, no overlap
+
+
+def test_crosstalk_is_transcribed_once():
+    # Two speakers overlapping by 0.28 s (as real sherpa output does): the one who started later
+    # has the overlap, so the audio is cut at their start.
+    assert spans(untangle([Turn(0.03, 5.80, 1), Turn(5.52, 9.28, 2)])) == [(0.03, 5.52, 1), (5.52, 9.28, 2)]
+    # A short interjection inside someone's turn splits it.
+    assert spans(untangle([Turn(0, 10, 0), Turn(5, 6, 1)])) == [(0, 5, 0), (5, 6, 1), (6, 10, 0)]
+
+
+def test_new_speaker_numbers_never_collide():
+    book = SpeakerBook([Speaker(1, np.eye(8, dtype=np.float32)[0], 3), Speaker(2, np.eye(8, dtype=np.float32)[1], 3),
+                        Speaker(4, np.eye(8, dtype=np.float32)[3], 3)])
+    assert book.match(np.eye(8, dtype=np.float32)[5], 3).number == 5
+
+
+class StubbedDiarizer(Diarizer):
+    """The real `turns` (per-turn matching, short-turn pooling, merging), with the models stubbed:
+    `_turns` returns the clusterer output given, and a voice is a one-hot of the audio's pitch."""
+
+    def __init__(self, clusterer_turns):
+        self._live_lock = threading.Lock()
+        self._given = clusterer_turns
+
+    def _turns(self, audio, live=False):
+        return tidy(self._given)
+
+    def voice(self, audio):
+        return FakeDiarizer.voice(int(np.fft.rfftfreq(len(audio), 1 / RATE)[np.abs(np.fft.rfft(audio)).argmax()] // 100))
+
+
+def test_real_turns_matches_each_long_turn_on_its_own_voice():
+    # The clusterer gives one label to two different voices (as it did to a short turn and the
+    # next speaker); per-turn matching against the book tells them apart.
+    audio = np.concatenate([pitch(300, 2.5), silence(1), pitch(700, 2.5)])
+    d = StubbedDiarizer([Turn(0, 2.5, 0), Turn(3.5, 6, 0)])
+    got = d.turns(audio, SpeakerBook())
+    assert [(spans([t])[0][:2], sp.number) for t, sp in got] == [((0, 2.5), 1), ((3.5, 6), 2)]
+
+
+def test_real_turns_pools_only_short_turns_by_label():
+    # Two short turns (300 Hz) share a label with a long turn of someone else (700 Hz): pooled on
+    # their own audio they match speaker 1, not the long turn's voice.
+    audio = np.concatenate([pitch(300, 0.7), silence(0.8), pitch(300, 0.7), silence(0.8), pitch(700, 3)])
+    book = SpeakerBook()
+    book.match(FakeDiarizer.voice(3), 3)  # speaker 1: 300 Hz
+    book.match(FakeDiarizer.voice(7), 3)  # speaker 2: 700 Hz
+    d = StubbedDiarizer([Turn(0, 0.7, 5), Turn(1.5, 2.2, 5), Turn(3.0, 6.0, 5)])
+    got = d.turns(audio, book)
+    # The two short turns are one speaker-1 turn after merging; the long one is speaker 2.
+    assert [sp.number for _, sp in got] == [1, 2]
+
+
+def test_a_failing_diarizer_never_loses_speech(tmp_path):
+    h = diarized(tmp_path)
+
+    class Broken(FakeDiarizer):
+        def turns(self, audio, book):
+            raise RuntimeError("model exploded")
+
+        def whole(self, audio):
+            raise RuntimeError("model exploded")
+
+    h.services.diarization = DiarizerSlot(Broken())
+    c = h.client
+    sid = c.post("/api/sessions", json={"source": "browser"}).json()["id"]
+    form = {"speaker_id": "tab", "speaker_name": "Others", "started_at": "1", "diarize": "true", "client_key": "k"}
+    r = c.post(f"/api/sessions/{sid}/utterances", data=form, files={"file": ("u.wav", wav(pitch(300, 2)))})
+    assert r.status_code == 201 and r.json()["speaker_id"] == "tab" and r.json()["text"]
+    up = c.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
+                files={"file": ("a.wav", wav(pitch(300, 2)))})
+    assert up.status_code == 200 and up.json()["speakers"] == 1
+
+
+def test_a_retry_after_a_busy_gpu_reuses_the_turns(tmp_path, monkeypatch):
+    h = diarized(tmp_path)
+    c = h.client
+    sid = c.post("/api/sessions", json={"source": "browser"}).json()["id"]
+    form = {"speaker_id": "tab", "speaker_name": "Others", "started_at": "1", "diarize": "true", "client_key": "k1"}
+    audio = wav(np.concatenate([pitch(300, 2.5), silence(1), pitch(700, 2.5), silence(0.5)]))
+    real_run = h.worker.run
+    calls = {"n": 0}
+
+    async def busy_once(fn):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise QueueFull("transcription queue is full")
+        return await real_run(fn)
+
+    monkeypatch.setattr(h.worker, "run", busy_once)
+    assert c.post(f"/api/sessions/{sid}/utterances", data=form, files={"file": ("u.wav", audio)}).status_code == 503
+    voices = {sid_: w for sid_, _, w in h.services.store.voices(sid, "tab#")}
+    r = c.post(f"/api/sessions/{sid}/utterances", data=form, files={"file": ("u.wav", audio)}).json()
+    assert [l["speaker_id"] for l in r["lines"]] == ["tab#1", "tab#2"]
+    # The retry did not diarize again: the book learned this audio once.
+    assert {sid_: w for sid_, _, w in h.services.store.voices(sid, "tab#")} == voices == {"tab#1": 2.5, "tab#2": 2.5}
+
+
+def test_diarized_upload_numbers_speakers_without_gaps(tmp_path):
+    h = diarized(tmp_path)
+    # Speaker 2's turn is silence: it transcribes to nothing and is dropped; speaker 3 becomes 2.
+    audio = np.concatenate([pitch(300, 2), silence(2), pitch(1100, 2)])
+    h.services.diarization.value.whole = lambda a: [(Turn(0, 2, 0), 1), (Turn(2, 4, 1), 2), (Turn(4, 6, 2), 3)]
+    r = h.client.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
+                      files={"file": ("a.wav", wav(audio))}).json()
+    assert [seg["speaker"] for seg in r["segments"]] == ["Speaker 1", "Speaker 2"] and r["speakers"] == 2
+
+
+def test_rename_is_capped(harness):
+    c = harness.client
+    sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]
+    assert c.post(f"/api/sessions/{sid}/speakers/u1", json={"name": "x" * 81}).status_code == 400
+
+
+def test_words_from_tokens():
+    from scribe_server.engines import words_from_tokens
+
+    words = words_from_tokens([" And", " so", ",", " my", " fe", "ll", "ow"], [0.2, 0.5, 0.8, 1.0, 1.3, 1.4, 1.5], 2.0)
+    assert [(w.text, w.start, w.end) for w in words] == [(" And", 0.2, 0.5), (" so,", 0.5, 1.0), (" my", 1.0, 1.3), (" fellow", 1.3, 2.0)]
+
+
+def test_words_go_to_the_turn_they_fall_in(tmp_path, monkeypatch):
+    """With word timings the utterance is transcribed once and its words shared out by time."""
+    from scribe_server.engines import Word
+
+    from .conftest import FakeEngine
+
+    def transcribe_words(self, audio):
+        # One word per half second of audio, named after its time in this chunk.
+        return [Word(f" w{i / 2:g}", i / 2, i / 2 + 0.4) for i in range(int(len(audio) / RATE * 2))]
+
+    monkeypatch.setattr(FakeEngine, "transcribe_words", transcribe_words, raising=False)
+    h = diarized(tmp_path)
+    c = h.client
+    sid = c.post("/api/sessions", json={"source": "browser"}).json()["id"]
+    audio = np.concatenate([pitch(300, 2), silence(1), pitch(700, 2), silence(0.5)])
+    form = {"speaker_id": "tab", "speaker_name": "Others", "started_at": "0", "diarize": "true"}
+    r = c.post(f"/api/sessions/{sid}/utterances", data=form, files={"file": ("u.wav", wav(audio))}).json()
+    assert [(l["speaker_id"], l["text"]) for l in r["lines"]] == [
+        # One ASR call for the 0-5 s chunk. A word in the 2-3 s gap goes to the nearer turn: w2
+        # (centre 2.2 s) to the first, w2.5 (centre 2.7 s) to the second.
+        ("tab#1", "w0 w0.5 w1 w1.5 w2"),
+        ("tab#2", "w2.5 w3 w3.5 w4 w4.5"),
+    ]
+    assert sum(e.calls for e in h.loader.engines.values()) == 0  # never transcribed per turn

@@ -34,8 +34,8 @@ def decode(data: bytes) -> np.ndarray:
 Vad = Callable[[np.ndarray], list[tuple[int, int]]]
 
 
-def speech_chunks(audio: np.ndarray, vad: Vad) -> list[np.ndarray]:
-    """Speech in `audio`, grouped into chunks of at most MAX_CHUNK_S.
+def speech_spans(audio: np.ndarray, vad: Vad) -> list[tuple[int, int]]:
+    """Where the speech in `audio` is, in samples, grouped into chunks of at most MAX_CHUNK_S.
 
     Neighbouring spans are merged while the merged chunk still fits, so a short utterance stays
     one call with its pauses (context helps the model) and a long recording becomes a few.
@@ -50,7 +50,11 @@ def speech_chunks(audio: np.ndarray, vad: Vad) -> list[np.ndarray]:
             chunks[-1] = (chunks[-1][0], end)
         else:
             chunks.append((start, end))
-    return [audio[start:end] for start, end in chunks]
+    return chunks
+
+
+def speech_chunks(audio: np.ndarray, vad: Vad) -> list[np.ndarray]:
+    return [audio[start:end] for start, end in speech_spans(audio, vad)]
 
 
 def wav_bytes(audio: np.ndarray, rate: int = RATE) -> bytes:

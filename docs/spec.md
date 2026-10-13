@@ -249,19 +249,34 @@ utterance `diarize` (the extension does, for the tab channel only).
 
 - **Models**, ONNX on the CPU through **sherpa-onnx** 1.13.8 (Apache-2.0), downloaded on first
   start into `models/_diarization/` (~45 MB): pyannote **segmentation 3.0** (MIT) finds speaker
-  turns; NVIDIA **TitaNet small** (CC-BY-4.0) gives each turn a voice embedding. They run on their
-  own worker thread, so the GPU queue never waits on them. sherpa-onnx carries its own CPU
-  onnxruntime, which loads beside onnxruntime-gpu 1.24.4 in the same process (tested: Parakeet
-  transcribes on the GPU after diarization ran).
+  turns; NVIDIA **TitaNet small** (CC-BY-4.0) gives each turn a voice embedding. Live calls and
+  uploads each have their own worker thread and models, so neither the GPU queue nor a call waits
+  on a long upload. sherpa-onnx carries its own CPU onnxruntime (1.28.2, soname `libonnxruntime.so`,
+  versioned symbols), which loads beside onnxruntime-gpu 1.24.4 (`libonnxruntime.so.1`) without
+  clashing; all 8 models pass with both loaded. (The separate CPU `onnxruntime` wheel that
+  faster-whisper pulls in shares onnxruntime-gpu's package directory, so it is dropped by a uv
+  override, and the install script reinstalls onnxruntime-gpu.)
 - **Live.** Each utterance is split into turns (clustering set to over-split). Each turn of 1 s
   or more is matched on its own voice against the session's **speaker book**, the running average
   voice of everyone heard so far; shorter turns are pooled by their clusterer label. A match is
   cosine similarity >= 0.35 (`SCRIBE_DIARIZE_MATCH`); only a turn of 2 s or more can found a new
   speaker, and a shorter unmatched one goes to the nearest. Matching per turn against the book
   matters: one utterance's clustering lumped a short turn in with the next speaker, which the
-  book, built over the whole call, gets right. Each turn is then transcribed and stored as its own
-  line, speaker `tab#1`, `tab#2`, ... named "Speaker 1", ... The book is saved with the session, so
-  labels survive a server restart.
+  book, built over the whole call, gets right. Where turns overlap (crosstalk), whoever started
+  later has the overlap.
+- **Words, not clips.** The utterance is transcribed once, exactly as without diarization, with
+  word timings (Parakeet's token times, Whisper's word timestamps), and each word goes to the turn
+  it falls in. Transcribing each turn on its own lost words (5.1% WER against 2.0% undiarized: a
+  clip cut at a turn edge loses context, and Parakeet returned nothing for one 3 s turn). Canary
+  gives no timings, so it falls back to a clip per turn, widened to the middle of the gaps around
+  it. Measured: diarized WER equals undiarized on Parakeet (2.0%), Whisper turbo (3.1%) and
+  Canary (4.1%).
+- **Lines.** Each turn is stored as its own line, speaker `tab#1`, `tab#2`, ... named "Speaker 1",
+  ... The book is saved with the session (numbers are never reused), so labels survive a restart.
+  An utterance's turns are kept until its lines are stored, so a retry after a busy queue or a
+  client timeout reuses them: the book never learns the same audio twice and the retry's lines
+  match. If diarization fails, the utterance is transcribed as one speaker: speech is never lost
+  to it.
 - **Renaming.** Clicking a name in the GUI renames that speaker for the session, past lines and
   later ones (`POST /api/sessions/{id}/speakers/{speaker_id}`). This works for any speaker,
   Discord users included.

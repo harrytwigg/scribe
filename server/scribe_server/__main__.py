@@ -43,6 +43,8 @@ def build(settings: Settings) -> Services:
         browser_idle_s=settings.browser_idle_s,
     )
     if settings.diarization:
+        services.diarize_worker = GpuWorker(settings.queue_depth, name="diarize-worker", label="speaker separation")
+        services.upload_worker = GpuWorker(settings.queue_depth, name="upload-diarize-worker", label="speaker separation")
         services.diarization = DiarizerSlot()
         services.diarization.load(partial(Diarizer, settings.models_dir, settings.diarization_threads))
     models.restore(settings.default_model)

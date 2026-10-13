@@ -71,7 +71,19 @@ def assert_consistent(found):
     assert len({next(iter(labels)) for labels in mapping.values()}) == 3, mapping
 
 
-def test_whole_recording(client):
+def use(client, model_id):
+    client.post(f"/api/models/{model_id}/activate")
+    deadline = time.monotonic() + 600
+    while client.get("/api/status").json()["active_model"] != model_id:
+        assert time.monotonic() < deadline, f"{model_id} did not activate"
+        time.sleep(1)
+
+
+# Parakeet and Whisper give word timings (one ASR call per utterance, words shared out by time);
+# Canary gives none, so it transcribes each turn on its own.
+@pytest.mark.parametrize("model_id", ["whisper-large-v3-turbo", "canary-1b-v2", MODEL])
+def test_whole_recording(client, model_id):
+    use(client, model_id)
     started = time.monotonic()
     r = client.post(
         "/v1/audio/transcriptions",
@@ -88,7 +100,16 @@ def test_whole_recording(client):
     assert_consistent(found)
     reference = " ".join(t["text"] for t in TRUTH)
     hypothesis = " ".join(seg["text"] for seg in body["segments"])
-    assert wer(reference, hypothesis) < 0.1
+    # Speech the segmenter misses never reaches the ASR, which a plain transcription would hear:
+    # splitting by speaker must not cost words.
+    plain = client.post(
+        "/v1/audio/transcriptions",
+        data={"response_format": "json"},
+        files={"file": ("c.wav", (FIXTURES / "conversation.wav").read_bytes())},
+    ).json()["text"]
+    diarized_wer, plain_wer = wer(reference, hypothesis), wer(reference, plain)
+    print(f"{model_id}: WER diarized {diarized_wer:.3f}, undiarized {plain_wer:.3f}")
+    assert diarized_wer < 0.1 and diarized_wer <= plain_wer + 0.02
 
 
 def test_live_utterances_keep_speakers(client):
@@ -113,6 +134,16 @@ def test_live_utterances_keep_speakers(client):
     found = who_spoke(lines, "started_at", "end", "speaker_id")
     assert_consistent(found)
     assert all(line["model_id"] == MODEL for line in lines)
+    # The same two utterances undiarized: the 25 s cut splits a word for both, so this is the fair
+    # comparison.
+    plain = " ".join(
+        client.post("/v1/audio/transcriptions", files={"file": ("u.wav", wav_bytes(audio[a:b]))}).json()["text"]
+        for a, b in [(0, cut), (cut, len(audio))]
+    )
+    reference = " ".join(t["text"] for t in TRUTH)
+    live_wer, plain_wer = wer(reference, " ".join(line["text"] for line in lines)), wer(reference, plain)
+    print(f"WER live diarized {live_wer:.3f}, undiarized {plain_wer:.3f}")
+    assert live_wer < 0.1 and live_wer <= plain_wer + 0.02
 
 
 def test_one_voice_stays_one_speaker(client):

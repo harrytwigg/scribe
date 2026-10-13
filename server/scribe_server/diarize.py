@@ -57,31 +57,54 @@ class Turn:
         return self.end - self.start
 
 
-def tidy(turns: list[Turn]) -> list[Turn]:
-    """Sorted turns, with close same-speaker turns joined and slivers folded into a neighbour."""
-    turns = sorted((Turn(t.start, t.end, t.label) for t in turns if t.end > t.start), key=lambda t: t.start)
+def untangle(turns: list[Turn]) -> list[Turn]:
+    """Turns that do not overlap. Where two speakers overlap (crosstalk), the one who started
+    later has the floor until their turn ends, so no stretch of audio is transcribed twice."""
+    turns = [t for t in turns if t.end > t.start]
+    bounds = sorted({b for t in turns for b in (t.start, t.end)})
+    out: list[Turn] = []
+    for a, b in zip(bounds, bounds[1:]):
+        covering = [t for t in turns if t.start <= a and t.end >= b]
+        if not covering:
+            continue
+        label = max(covering, key=lambda t: (t.start, -t.label)).label
+        if out and out[-1].label == label and out[-1].end == a:
+            out[-1].end = b
+        else:
+            out.append(Turn(a, b, label))
+    return out
+
+
+def _join(turns: list[Turn]) -> list[Turn]:
     joined: list[Turn] = []
     for turn in turns:
         if joined and joined[-1].label == turn.label and turn.start - joined[-1].end < JOIN_GAP_S:
             joined[-1].end = max(joined[-1].end, turn.end)
         else:
             joined.append(turn)
-    # Fold slivers into the previous turn (or the next, for a leading one), then join again.
+    return joined
+
+
+def tidy(turns: list[Turn]) -> list[Turn]:
+    """Non-overlapping turns in order, close same-speaker turns joined, and slivers folded into a
+    neighbour (the turn before, or for leading slivers the turn after)."""
+    joined = _join(untangle([Turn(t.start, t.end, t.label) for t in turns]))
     out: list[Turn] = []
-    for i, turn in enumerate(joined):
-        if turn.duration >= MIN_TURN_S or len(joined) == 1:
+    lead: list[Turn] = []  # slivers before the first real turn
+    for turn in joined:
+        if turn.duration >= MIN_TURN_S:
+            if lead:
+                turn.start = lead[0].start
+                lead = []
             out.append(turn)
         elif out:
             out[-1].end = max(out[-1].end, turn.end)
         else:
-            joined[i + 1].start = min(joined[i + 1].start, turn.start)
-    merged: list[Turn] = []
-    for turn in out:
-        if merged and merged[-1].label == turn.label and turn.start - merged[-1].end < JOIN_GAP_S:
-            merged[-1].end = max(merged[-1].end, turn.end)
-        else:
-            merged.append(turn)
-    return merged
+            lead.append(turn)
+    if lead:  # nothing but slivers: one turn, for whoever spoke most of it
+        longest = max(lead, key=lambda t: t.duration)
+        out.append(Turn(lead[0].start, lead[-1].end, longest.label))
+    return _join(out)
 
 
 @dataclass
@@ -111,7 +134,8 @@ class SpeakerBook:
                 best.centroid = mixed / np.linalg.norm(mixed)
                 best.weight += seconds
             return best
-        speaker = Speaker(len(self.speakers) + 1, voice, seconds)
+        # max + 1, not len + 1: numbers must stay unique even if the book has a gap.
+        speaker = Speaker(max((sp.number for sp in self.speakers), default=0) + 1, voice, seconds)
         self.speakers.append(speaker)
         return speaker
 
@@ -126,7 +150,8 @@ def _fetch(url: str, dest: Path) -> None:
 
 
 class Diarizer:
-    """sherpa-onnx diarization and speaker embeddings. Thread-safe: one call at a time."""
+    """sherpa-onnx diarization and speaker embeddings. Thread-safe: live calls (`turns`) and whole
+    recordings (`whole`) use separate models and locks, so a long upload never holds up a call."""
 
     def __init__(self, models_dir: Path, threads: int = 8):
         import sherpa_onnx
@@ -174,7 +199,8 @@ class Diarizer:
         # while a merge here (a short turn lumped in with the next speaker) cannot be undone.
         self._whole = diarizer(0.8)
         self._live = diarizer(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3")))
-        self._lock = threading.Lock()
+        self._live_lock = threading.Lock()
+        self._whole_lock = threading.Lock()
 
     def _turns(self, audio: np.ndarray, live: bool = False) -> list[Turn]:
         result = (self._live if live else self._whole).process(audio).sort_by_start_time()
@@ -195,7 +221,7 @@ class Diarizer:
         only, so a long turn of someone else under the same label cannot outvote them) and matched
         together.
         """
-        with self._lock:
+        with self._live_lock:
             turns = self._turns(audio, live=True)
             clip = lambda ts: np.concatenate([audio[int(t.start * RATE) : int(t.end * RATE)] for t in ts])  # noqa: E731
             by_label: dict[int, Speaker] = {}
@@ -213,7 +239,7 @@ class Diarizer:
 
     def whole(self, audio: np.ndarray) -> list[tuple[Turn, int]]:
         """Turns of a whole recording, speakers numbered 1.. in order of first appearance."""
-        with self._lock:
+        with self._whole_lock:
             turns = self._turns(audio)
         numbers: dict[int, int] = {}
         return [(t, numbers.setdefault(t.label, len(numbers) + 1)) for t in turns]
