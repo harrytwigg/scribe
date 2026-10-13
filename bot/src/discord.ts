@@ -323,8 +323,9 @@ export class ScribeBot {
         const heard = call.pipeline.heard.get(member.id)
         if (this.optedOut.has(member.id)) return `- ${member.displayName}: opted out`
         if (!heard?.packets) return `- ${member.displayName}: not heard yet`
-        if (heard.corrupt === heard.packets) return `- ${member.displayName}: audio arriving but not decodable`
-        const skipped = heard.corrupt ? ` (${heard.corrupt} packets not decodable)` : ''
+        const unusable = heard.corrupt + heard.encrypted
+        if (unusable === heard.packets) return `- ${member.displayName}: audio arriving but not decodable`
+        const skipped = unusable ? ` (${unusable} packets not decodable)` : ''
         return `- ${member.displayName}: ${heard.lines} line${heard.lines === 1 ? '' : 's'}${skipped}`
       })
   }
@@ -343,7 +344,9 @@ export class ScribeBot {
       this.log(`stopped session ${call.sessionId}: ${reason}`)
       for (const [userId, heard] of call.pipeline.heard) {
         const name = call.guild.members.cache.get(userId)?.displayName ?? userId
-        this.log(`  heard ${name}: ${heard.lines} lines, ${heard.packets} packets, ${heard.corrupt} undecodable`)
+        this.log(
+          `  heard ${name}: ${heard.lines} lines, ${heard.packets} packets, ${heard.encrypted} still encrypted, ${heard.corrupt} not Opus`,
+        )
       }
     })()
     await call.stopping

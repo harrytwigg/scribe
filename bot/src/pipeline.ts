@@ -10,16 +10,25 @@ import type { VoiceSource } from './voice-source.js'
 
 export const SILENCE_MS = 800
 
+/** Smallest DAVE trailer: 8-byte tag, 1-byte nonce, the size byte itself, the 2-byte marker. */
+const MIN_DAVE_TRAILER = 12
+
 /**
- * True for a DAVE end-to-end encrypted frame: every one ends in the protocol's magic marker
- * 0xFAFA. @discordjs/voice hands such a frame through still encrypted when it cannot decrypt it
- * yet (just after joining, or mid key change). It must never reach the decoder: about half of
- * them "decode" as noise, which would be posted as the user's speech, and decoding many of them
- * corrupts opusscript's heap, which every decoder in the process shares. A real Opus frame ends
- * in 0xFAFA once in 65536, so a false match costs one 20 ms frame.
+ * True for a DAVE end-to-end encrypted frame. @discordjs/voice hands one through still encrypted
+ * when it cannot decrypt it yet (just after joining, or mid key change). It must never reach the
+ * decoder: about half of them "decode" as noise, which would be posted as the user's speech, and
+ * decoding many corrupts opusscript's heap, which every decoder in the process shares.
+ *
+ * Every DAVE frame ends in the marker 0xFAFA, preceded by the size of its trailer (tag, nonce,
+ * unencrypted ranges, that byte and the marker). Real Opus frames end in 0xFAFA far more often
+ * than chance (about 1 in 1500 here), so the size byte must be plausible too. A real frame that
+ * still matches costs 20 ms of audio.
  */
 export function isEncryptedFrame(packet: Buffer): boolean {
-  return packet.length >= 2 && packet[packet.length - 2] === 0xfa && packet[packet.length - 1] === 0xfa
+  const n = packet.length
+  if (n < MIN_DAVE_TRAILER || packet[n - 2] !== 0xfa || packet[n - 1] !== 0xfa) return false
+  const trailer = packet[n - 3]
+  return trailer >= MIN_DAVE_TRAILER && trailer <= n
 }
 
 export interface PipelineOptions {
@@ -36,8 +45,10 @@ export interface PipelineOptions {
 /** What has been heard from one user this call, for `/scribe status` and the end-of-call log. */
 export interface Heard {
   packets: number
-  /** Packets that could not be used: still DAVE-encrypted, or not valid Opus. */
+  /** Packets that were not valid Opus. */
   corrupt: number
+  /** Frames still DAVE-encrypted, dropped unheard: expected for a moment after the bot joins. */
+  encrypted: number
   /** Lines the server transcribed (utterances it found no speech in are not counted). */
   lines: number
 }
@@ -56,7 +67,7 @@ export class Pipeline {
     const { source, client, sessionId, isOptedOut, onLine, onError } = this.options
     if (this.stopped || this.active.has(userId) || isOptedOut(userId)) return
     const speakerPromise = Promise.resolve(this.options.speaker(userId))
-    const heard = this.heard.get(userId) ?? { packets: 0, corrupt: 0, lines: 0 }
+    const heard = this.heard.get(userId) ?? { packets: 0, corrupt: 0, encrypted: 0, lines: 0 }
     this.heard.set(userId, heard)
     const segmenter = new Segmenter((utterance) => {
       const job = speakerPromise
@@ -111,8 +122,7 @@ export class Pipeline {
       if (finished) return
       heard.packets++
       if (isEncryptedFrame(packet)) {
-        corrupt++
-        heard.corrupt++
+        heard.encrypted++
         return
       }
       let pcm: Buffer

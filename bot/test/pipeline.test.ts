@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import type { ScribeClient, Speaker } from '../src/client.js'
 import { durationMs } from '../src/pcm.js'
-import { Pipeline } from '../src/pipeline.js'
-import { ReplaySource } from '../src/replay.js'
+import { Pipeline, isEncryptedFrame } from '../src/pipeline.js'
+import { ReplaySource, encodeOpus, encryptedFrames } from '../src/replay.js'
 
 // A tone, so Opus keeps real signal through the round trip.
 function tone(ms: number, hz: number) {
@@ -105,7 +105,7 @@ describe('Pipeline with undecodable packets', () => {
     const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
     expect(byUser('harry')).toEqual([2000, 1500])
     expect(byUser('badger')).toEqual([2000])
-    expect(pipeline.heard.get('harry')).toMatchObject({ corrupt: 1, lines: 2 })
+    expect(pipeline.heard.get('harry')).toMatchObject({ corrupt: 1, encrypted: 0, lines: 2 })
     expect(errors).toEqual(['skipped 1 undecodable packet(s) from harry'])
   })
 
@@ -152,7 +152,18 @@ describe('Pipeline with frames it cannot decrypt', () => {
     // Only the real speech: none of the encrypted frames became audio.
     expect(byUser('harry')).toEqual([1000, 1500])
     expect(byUser('badger')).toEqual([2000])
-    expect(pipeline.heard.get('harry')?.corrupt).toBe(500)
+    expect(pipeline.heard.get('harry')).toMatchObject({ encrypted: 500, corrupt: 0 })
+  })
+})
+
+describe('isEncryptedFrame', () => {
+  it('matches DAVE frames and not real Opus that happens to end in 0xFAFA', () => {
+    expect(encryptedFrames(200, 7).every(isEncryptedFrame)).toBe(true)
+    // Opus ends in 0xFAFA far more often than chance; the trailer size byte tells them apart.
+    const real = encodeOpus(tone(60_000, 300))
+    expect(real.filter(isEncryptedFrame).length).toBeLessThanOrEqual(1)
+    const lookalike = Buffer.concat([Buffer.alloc(40, 0x11), Buffer.from([0x03, 0xfa, 0xfa])])
+    expect(isEncryptedFrame(lookalike)).toBe(false)
   })
 })
 

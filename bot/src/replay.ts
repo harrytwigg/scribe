@@ -27,7 +27,7 @@ export interface ReplayClip {
   corruptFirst?: number
   /**
    * DAVE-encrypted frames sent ahead of the speech, as @discordjs/voice hands them through when it
-   * cannot decrypt them yet: random bytes ending in the 0xFAFA marker. About half of them would
+   * cannot decrypt them yet: random bytes ending in a DAVE trailer and the 0xFAFA marker. About half of them would
    * "decode" as noise. Seeded, so a test sees the same frames every run.
    */
   encryptedFirst?: number
@@ -44,8 +44,11 @@ export function encryptedFrames(count: number, seed = 1): Buffer[] {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
   return Array.from({ length: count }, () => {
+    // Ciphertext, an 8-byte tag, a 1-byte nonce, the trailer size (12) and the marker.
     const frame = Buffer.alloc(40 + Math.floor(random() * 120))
-    for (let i = 0; i < frame.length - 2; i++) frame[i] = Math.floor(random() * 256)
+    for (let i = 0; i < frame.length - 3; i++) frame[i] = Math.floor(random() * 256)
+    frame[frame.length - 4] &= 0x7f // the nonce, ULEB128: one byte
+    frame[frame.length - 3] = 12
     frame[frame.length - 2] = 0xfa
     frame[frame.length - 1] = 0xfa
     return frame

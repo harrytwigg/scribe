@@ -92,8 +92,8 @@ describe('ScribeBot', () => {
       channel: { members: new Collection([member('a', 'Harry'), member('b', 'Badger'), member('c', 'Cat'), member('d', 'Dee'), member('x', 'scribe', true)]) },
       pipeline: {
         heard: new Map([
-          ['b', { packets: 120, corrupt: 4, lines: 3 }],
-          ['d', { packets: 50, corrupt: 50, lines: 0 }],
+          ['b', { packets: 120, corrupt: 1, encrypted: 3, lines: 3 }],
+          ['d', { packets: 50, corrupt: 0, encrypted: 50, lines: 0 }],
         ]),
       },
     }
