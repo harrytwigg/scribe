@@ -57,7 +57,11 @@ label.check { display: inline-flex; gap: 6px; align-items: center; }
 .list small { display: block; color: var(--muted); }
 .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
 .toolbar a, .toolbar button { color: var(--accent); background: none; border: none; padding: 0; cursor: pointer; font: inherit; text-decoration: underline; }
-.toolbar h3 { margin: 0 auto 0 0; font-size: 16px; }
+.toolbar h3 { margin: 0; font-size: 16px; }
+.toolbar h3 button.title { color: var(--text); text-decoration: none; font-weight: 600; }
+.toolbar h3 button.title:hover { text-decoration: underline; }
+.toolbar .state { margin-right: auto; color: var(--muted); }
+.toolbar .state.live { color: #d93025; font-weight: 600; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .file { display: flex; gap: 8px; align-items: center; }
 .result { margin-top: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-height: 80px; white-space: pre-wrap; }

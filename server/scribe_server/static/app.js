@@ -20,7 +20,7 @@ async function api(path, options = {}) {
   if (!response.ok) {
     let detail = response.statusText;
     try { detail = (await response.json()).detail ?? detail; } catch {}
-    throw new Error(detail);
+    throw Object.assign(new Error(detail), { status: response.status });
   }
   const type = response.headers.get('content-type') ?? '';
   return type.includes('json') ? response.json() : response.text();
@@ -37,14 +37,24 @@ const formatSize = (mb) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb}
 // ---- tabs ------------------------------------------------------------------------------------
 
 let currentTab = 'models';
-function showTab(name) {
+function showTab(name, id = null) {
   currentTab = name;
+  // Back on a tab: its viewer's call, unless the URL names another.
+  id ??= name === 'live' ? liveViewer.current : name === 'history' ? historyViewer.current : null;
   for (const button of document.querySelectorAll('nav button')) button.setAttribute('aria-selected', button.dataset.tab === name);
   for (const section of document.querySelectorAll('.tab')) section.hidden = section.id !== `tab-${name}`;
-  if (name === 'live') refreshLive();
-  if (name === 'history') refreshHistory();
+  // Only the visible tab follows a call (the other keeps which call it was on).
+  if (name !== 'live') liveViewer.close();
+  if (name !== 'history') historyViewer.close();
+  setRoute(name, id);
+  if (name === 'live') refreshLive(id).catch(() => {});
+  if (name === 'history') refreshHistory(id).catch(() => {});
 }
 for (const button of document.querySelectorAll('nav button')) button.addEventListener('click', () => showTab(button.dataset.tab));
+window.addEventListener('hashchange', () => {
+  const { tab, id } = route();
+  if (tab !== currentTab || (id && id !== (tab === 'live' ? liveViewer.current : historyViewer.current))) showTab(tab, id);
+});
 
 // ---- sign-in ---------------------------------------------------------------------------------
 
@@ -60,7 +70,9 @@ $('#login-form').addEventListener('submit', async (event) => {
     $('#login').hidden = true;
     $('nav').hidden = false;
     $('#token').value = '';
-    showTab(currentTab);
+    // A 401 ended the event streams for good: open the calls afresh.
+    liveViewer.close();
+    historyViewer.close();
     start();
   } catch (error) {
     if (!(error instanceof Unauthorised)) $('#login-error').textContent = error.message;
@@ -136,91 +148,271 @@ async function refreshModels() {
 const hue = (id) => Math.round(([...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 9973, 7) * 137.508) % 360);
 
 // Click a name to rename that speaker for the whole session (past and future lines).
-async function renameSpeaker(session, u, current) {
+async function renameSpeaker(session, u, button) {
+  const current = button.textContent;
   const name = prompt(`Rename ${current} in this session:`, current);
   if (!name?.trim() || name.trim() === current) return;
   try {
-    await api(`/api/sessions/${session.id}/speakers/${encodeURIComponent(u.speaker_id)}`, {
+    const renamed = await api(`/api/sessions/${session.id}/speakers/${encodeURIComponent(u.speaker_id)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
     });
-    showSpeakerName(u.speaker_id, name.trim());
+    showSpeakerName(button.closest('.transcript'), u.speaker_id, renamed.name);
   } catch (error) { if (!(error instanceof Unauthorised)) alert(error.message); }
 }
 
-function showSpeakerName(speakerId, name) {
-  for (const node of document.querySelectorAll('.who')) {
-    if (node.dataset.speaker === speakerId) { node.textContent = name; node.title = `${name} (click to rename)`; }
+// Within one transcript only: speaker ids ("tab", "mic") repeat across calls.
+function showSpeakerName(scope, speakerId, name) {
+  for (const node of scope?.querySelectorAll('.who') ?? []) {
+    if (node.dataset.speaker === speakerId && node.textContent !== name) {
+      node.textContent = name;
+      node.title = `${name} (click to rename)`;
+    }
   }
 }
 
-const lineNode = (session, u) => el('div', { class: 'line' },
+const lineNode = (session, u) => el('div', { class: 'line', 'data-started': u.started_at },
   el('time', {}, clock(u.started_at - session.started_at)),
   el('button', {
     class: 'who', type: 'button', title: `${u.speaker_name} (click to rename)`, 'data-speaker': u.speaker_id,
-    style: `--hue:${hue(u.speaker_id)}`, onclick: (event) => renameSpeaker(session, u, event.currentTarget.textContent),
+    style: `--hue:${hue(u.speaker_id)}`, onclick: (event) => renameSpeaker(session, u, event.currentTarget),
   }, u.speaker_name),
   el('p', { style: 'margin:0' }, u.text));
 
-// ---- live ------------------------------------------------------------------------------------
+// ---- transcript viewer -----------------------------------------------------------------------
 
-let liveSource = null;
-let liveSession = null;
-let liveOpening = 0;
-async function refreshLive() {
-  if (currentTab !== 'live') return;
-  const sessions = (await api('/api/sessions')).filter((s) => s.ended_at == null);
-  $('#live-sessions').replaceChildren(...sessions.map((s) => el('button', { class: liveSession?.id === s.id ? 'on' : '', onclick: () => openLive(s.id) }, s.title)));
-  if (!liveSession && sessions.length) openLive(sessions[0].id);
+// Live and History share one viewer. It follows an open call as it is transcribed: the event
+// stream delivers lines as they land, and a poll every few seconds catches anything the stream
+// missed (a dropped connection, a proxy that buffers). Lines are keyed by id, so nothing doubles.
+//
+// `current` is the call the viewer is on: shown, or still loading. It survives leaving the tab
+// (the viewer stops following while hidden) so coming back reopens the same call, and a list
+// refresh never takes the viewer to another call while one is loading.
+const POLL_MS = 4000;
+
+async function renameSession(id, current) {
+  const title = prompt('Rename this call:', current);
+  if (!title?.trim() || title.trim() === current) return;
+  try {
+    const session = await api(`/api/sessions/${id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: title.trim() }),
+    });
+    for (const viewer of [liveViewer, historyViewer]) viewer.retitle(id, session.title);
+    refreshLists();
+  } catch (error) { if (!(error instanceof Unauthorised)) alert(error.message); }
 }
 
-async function openLive(id) {
-  liveSource?.close();
-  liveSource = null;
-  // A newer openLive may start while this one awaits; only the latest may attach a stream.
-  const opening = ++liveOpening;
-  const session = await api(`/api/sessions/${id}`);
-  if (opening !== liveOpening) return;
-  liveSession = session;
-  const box = $('#live-transcript');
-  box.replaceChildren(...session.utterances.map((u) => lineNode(session, u)));
-  liveSource = new EventSource(`/api/sessions/${id}/events`);
-  liveSource.addEventListener('line', (event) => {
-    box.append(lineNode(session, JSON.parse(event.data)));
-    box.lastElementChild.scrollIntoView({ block: 'nearest' });
-  });
-  liveSource.addEventListener('speaker', (event) => {
-    const { speaker_id, name } = JSON.parse(event.data);
-    showSpeakerName(speaker_id, name);
-  });
-  liveSource.addEventListener('end', () => { liveSource.close(); box.append(el('p', { class: 'hint' }, 'Session ended.')); liveSession = null; });
-  refreshLive();
+class Viewer {
+  constructor(box, { empty, tools } = {}) {
+    this.box = box;
+    this.empty = empty;
+    this.tools = tools ?? (() => []);
+    this.current = null;
+    this.session = null;
+    this.loading = false;
+    this.opening = 0;
+  }
+
+  // Showing its call, or loading it (as opposed to stopped while its tab was hidden).
+  get active() { return this.loading || this.session != null; }
+
+  /** Stop following (the tab is hidden, or another call opens); remember which call it was. */
+  close() {
+    this.source?.close();
+    this.source = null;
+    clearInterval(this.timer);
+    this.timer = null;
+    this.session = null;
+    this.loading = false;
+    this.opening++;
+  }
+
+  showEmpty(message) {
+    this.close();
+    this.current = null;
+    this.box.replaceChildren(el('p', { class: 'hint' }, message ?? this.empty));
+  }
+
+  async open(id) {
+    this.close();
+    this.current = id;
+    this.loading = true;
+    const opening = this.opening;
+    let session;
+    try { session = await api(`/api/sessions/${id}`); } catch (error) {
+      if (opening !== this.opening || error instanceof Unauthorised) return false;
+      this.showEmpty(error.status === 404 ? 'That call was deleted.' : `Cannot open that call: ${error.message}`);
+      return false;
+    }
+    if (opening !== this.opening) return false; // a newer open (or a close) won
+    this.loading = false;
+    this.session = session;
+    this.ids = new Set();
+    this.header = el('div', { class: 'toolbar' });
+    this.lines = el('div', { class: 'lines' }, el('p', { class: 'hint' }, 'No lines yet.'));
+    this.box.replaceChildren(this.header, this.lines);
+    this.renderHeader();
+    this.merge(session.utterances);
+    if (session.ended_at == null) this.follow();
+    return true;
+  }
+
+  renderHeader() {
+    const s = this.session;
+    this.header.replaceChildren(
+      el('h3', {}, el('button', { class: 'title', type: 'button', title: 'Click to rename this call', onclick: () => renameSession(s.id, s.title) }, s.title)),
+      el('small', { class: s.ended_at == null ? 'state live' : 'state' }, s.ended_at == null ? '● live' : `ended ${when(s.ended_at)}`),
+      ...this.tools(s),
+    );
+  }
+
+  retitle(id, title) {
+    if (this.session?.id !== id) return;
+    this.session.title = title;
+    this.renderHeader();
+  }
+
+  merge(utterances) {
+    const follow = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
+    let added = false;
+    for (const u of utterances) {
+      if (this.ids.has(u.id)) continue;
+      this.ids.add(u.id);
+      this.lines.querySelector(':scope > .hint')?.remove();
+      const node = lineNode(this.session, u);
+      // In time order (two speakers' lines can land out of order); the usual case is the newest.
+      const last = this.lines.lastElementChild;
+      if (!last || Number(last.dataset.started) <= u.started_at) this.lines.append(node);
+      else this.lines.insertBefore(node, [...this.lines.children].find((n) => Number(n.dataset.started) > u.started_at));
+      added = true;
+    }
+    if (added && follow && this.session.ended_at == null) this.lines.lastElementChild?.scrollIntoView({ block: 'nearest' });
+  }
+
+  follow() {
+    const id = this.session.id;
+    const source = new EventSource(`/api/sessions/${id}/events`);
+    this.source = source;
+    let dropped = false;
+    source.addEventListener('error', () => { dropped = true; });
+    source.addEventListener('open', () => { if (dropped) { dropped = false; this.sync(); } });
+    source.addEventListener('line', (event) => this.merge([JSON.parse(event.data)]));
+    source.addEventListener('speaker', (event) => {
+      const { speaker_id, name } = JSON.parse(event.data);
+      showSpeakerName(this.box, speaker_id, name);
+    });
+    source.addEventListener('title', (event) => { this.retitle(id, JSON.parse(event.data).title); refreshLists(); });
+    source.addEventListener('end', (event) => this.ended(JSON.parse(event.data)));
+    this.timer = setInterval(() => this.sync(), POLL_MS);
+  }
+
+  async sync() {
+    const id = this.session?.id;
+    if (!id) return;
+    let s;
+    try { s = await api(`/api/sessions/${id}`); } catch (error) {
+      if (this.session?.id === id && error.status === 404) {
+        this.showEmpty('That call was deleted.');
+        refreshLists();
+      }
+      return;
+    }
+    if (this.session?.id !== id) return;
+    if (s.title !== this.session.title) this.retitle(id, s.title);
+    this.merge(s.utterances);
+    // Speakers renamed while the stream was down.
+    for (const [speakerId, name] of Object.entries(s.speakers ?? {})) showSpeakerName(this.box, speakerId, name);
+    if (s.ended_at != null) this.ended(s);
+  }
+
+  ended(s) {
+    if (!this.session || this.session.ended_at != null) return;
+    this.source?.close();
+    this.source = null;
+    clearInterval(this.timer);
+    this.timer = null;
+    this.session.ended_at = s.ended_at;
+    this.renderHeader();
+    refreshLists();
+  }
+}
+
+// ---- routing: the tab and the open call live in the URL, so a refresh keeps them -------------
+
+const TABS = ['models', 'live', 'history', 'try'];
+
+function route() {
+  const [tab, id] = location.hash.slice(1).split('/');
+  return { tab: TABS.includes(tab) ? tab : 'models', id: id || null };
+}
+
+function setRoute(tab, id) {
+  const hash = `#${tab}${id ? `/${id}` : ''}`;
+  if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+// ---- live ------------------------------------------------------------------------------------
+
+const liveViewer = new Viewer($('#live-transcript'), {
+  empty: 'No call is being transcribed. Start one with /scribe join in Discord, or the Chrome extension.',
+});
+
+async function refreshLive(wanted = null) {
+  if (currentTab !== 'live') return;
+  const open = (await api('/api/sessions')).filter((s) => s.ended_at == null);
+  if (currentTab !== 'live') return;
+  $('#live-sessions').replaceChildren(...open.map((s) =>
+    el('button', { class: liveViewer.current === s.id ? 'on' : '', onclick: () => showCall('live', s.id) }, s.title)));
+  // The call asked for, else the one the viewer is on (even once it has ended, so the screen
+  // never jumps), else the newest live call.
+  const target = wanted ?? liveViewer.current ?? open[0]?.id;
+  if (!target) {
+    if (liveViewer.current !== null || !liveViewer.box.querySelector(':scope > .hint')) liveViewer.showEmpty();
+  } else if (target !== liveViewer.current || !liveViewer.active) {
+    showCall('live', target);
+  }
+}
+
+// Open a call in a tab's viewer and put it in the URL.
+async function showCall(tab, id) {
+  const viewer = tab === 'live' ? liveViewer : historyViewer;
+  setRoute(tab, id);
+  if (await viewer.open(id)) (tab === 'live' ? refreshLive : refreshHistory)().catch(() => {});
 }
 
 // ---- history ---------------------------------------------------------------------------------
 
-async function refreshHistory() {
-  const sessions = await api('/api/sessions');
-  $('#history').replaceChildren(...sessions.map((s) => el('li', {},
-    el('button', { onclick: (event) => openHistory(s.id, event.currentTarget) },
-      s.title, el('small', {}, `${when(s.started_at)} · ${s.lines} lines${s.ended_at == null ? ' · live' : ''}`)))));
-  if (!sessions.length) $('#history').replaceChildren(el('li', { class: 'hint' }, 'Nothing yet.'));
+const historyViewer = new Viewer($('#history-view'), {
+  empty: 'Pick a call.',
+  tools: (s) => [
+    ...['md', 'srt', 'json'].map((f) => el('a', { href: `/api/sessions/${s.id}/export?format=${f}` }, f.toUpperCase())),
+    el('button', { onclick: () => removeSession(s.id) }, 'Delete'),
+  ],
+});
+
+async function removeSession(id) {
+  if (!confirm('Delete this transcript?')) return;
+  await api(`/api/sessions/${id}`, { method: 'DELETE' });
+  historyViewer.showEmpty('Deleted.');
+  if (liveViewer.current === id) liveViewer.showEmpty();
+  setRoute('history');
+  refreshHistory();
 }
 
-async function openHistory(id, button) {
-  for (const b of document.querySelectorAll('#history button')) b.classList.toggle('on', b === button);
-  const session = await api(`/api/sessions/${id}`);
-  const remove = async () => {
-    if (!confirm('Delete this transcript?')) return;
-    await api(`/api/sessions/${id}`, { method: 'DELETE' });
-    $('#history-view').replaceChildren(el('p', { class: 'hint' }, 'Deleted.'));
-    refreshHistory();
-  };
-  $('#history-view').replaceChildren(
-    el('div', { class: 'toolbar' }, el('h3', {}, session.title),
-      ...['md', 'srt', 'json'].map((f) => el('a', { href: `/api/sessions/${id}/export?format=${f}` }, f.toUpperCase())),
-      el('button', { onclick: remove }, 'Delete')),
-    ...(session.utterances.length ? session.utterances.map((u) => lineNode(session, u)) : [el('p', { class: 'hint' }, 'No lines.')]),
-  );
+async function refreshHistory(wanted = null) {
+  if (currentTab !== 'history') return;
+  const sessions = await api('/api/sessions');
+  if (currentTab !== 'history') return;
+  $('#history').replaceChildren(...sessions.map((s) => el('li', {},
+    el('button', { class: historyViewer.current === s.id ? 'on' : '', onclick: () => showCall('history', s.id) },
+      s.title, el('small', {}, `${when(s.started_at)} · ${s.lines} line${s.lines === 1 ? '' : 's'}${s.ended_at == null ? ' · live' : ''}`)))));
+  if (!sessions.length) $('#history').replaceChildren(el('li', { class: 'hint' }, 'Nothing yet.'));
+  const target = wanted ?? historyViewer.current;
+  if (target && (target !== historyViewer.current || !historyViewer.active)) showCall('history', target);
+}
+
+function refreshLists() {
+  if (currentTab === 'live') refreshLive().catch(() => {});
+  if (currentTab === 'history') refreshHistory().catch(() => {});
 }
 
 // ---- try it ----------------------------------------------------------------------------------
@@ -305,10 +497,13 @@ $('#try-record').addEventListener('click', async () => {
 
 let started = false;
 function start() {
+  const { tab, id } = route();
+  showTab(tab, id); // also after signing in again, when the tabs were hidden
   if (started) return;
   started = true;
   refreshModels();
-  setInterval(() => { if (currentTab === 'live') refreshLive().catch(() => {}); }, 5000);
+  // New and ended calls show up in the lists without a refresh.
+  setInterval(refreshLists, POLL_MS);
 }
 
 (async () => {

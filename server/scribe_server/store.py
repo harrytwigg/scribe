@@ -109,6 +109,9 @@ class Store:
     def open_sessions(self, source: str) -> list[dict]:
         return self._all("select * from sessions where ended_at is null and source = ?", source)
 
+    def rename_session(self, session_id: str, title: str) -> None:
+        self._exec("update sessions set title = ? where id = ?", title, session_id)
+
     def end_session(self, session_id: str) -> None:
         self._exec("update sessions set ended_at = ? where id = ? and ended_at is null", time.time(), session_id)
 

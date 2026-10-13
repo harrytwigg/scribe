@@ -159,10 +159,55 @@ def test_gui(server, page):
     page.locator("#live-transcript .who", has_text="Ada Lovelace").wait_for()
     assert api.get(f"/api/sessions/{session['id']}").json()["utterances"][0]["speaker_name"] == "Ada Lovelace"
 
-    # History: the session, its export links, deleting it.
-    api.post(f"/api/sessions/{session['id']}/end").raise_for_status()
+    sid = session["id"]
+
+    def say(speaker="Ada"):
+        api.post(
+            f"/api/sessions/{sid}/utterances",
+            files={"file": ("u.wav", JFK.read_bytes(), "audio/wav")},
+            data={"speaker_id": "1", "speaker_name": speaker, "started_at": str(time.time())},
+        ).raise_for_status()
+
+    # A refresh keeps the tab and the call (they are in the URL).
+    assert page.evaluate("location.hash") == f"#live/{sid}"
+    page.reload()
+    page.locator("#live-transcript .line").first.wait_for(timeout=15_000)
+    assert page.get_by_role("tab", name="Live").get_attribute("aria-selected") == "true"
+    assert "Ada Lovelace" in page.inner_text("#live-transcript")
+
+    # Rename the call by clicking its title: the header and the call list both change.
+    PROMPT_ANSWERS.append("Weekly sync")
+    page.locator("#live-transcript button.title").click()
+    page.locator("#live-transcript button.title", has_text="Weekly sync").wait_for()
+    page.locator("#live-sessions button", has_text="Weekly sync").wait_for(timeout=10_000)
+    assert api.get(f"/api/sessions/{sid}").json()["title"] == "Weekly sync"
+
+    # History follows an open call too: a new line appears without a refresh.
     page.get_by_role("tab", name="History").click()
-    page.locator("#history button").first.click()
+    page.locator("#history button", has_text="Weekly sync").click()
+    page.locator("#history-view .line").first.wait_for()
+    assert page.evaluate("location.hash") == f"#history/{sid}"
+    say()
+    page.locator("#history-view .line").nth(1).wait_for(timeout=30_000)
+    shot(page, "06b-history-live")
+
+    # With the event stream broken (a buffering proxy, say), the poll still brings lines in.
+    context = page.context
+    blind = context.new_page()
+    blind.add_init_script("window.EventSource = class { addEventListener() {} close() {} }")
+    blind.goto(f"{server}/#live/{sid}")
+    blind.locator("#live-transcript .line").nth(1).wait_for(timeout=15_000)
+    say()
+    blind.locator("#live-transcript .line").nth(2).wait_for(timeout=30_000)
+    blind.close()
+
+    # Ending the call shows in the open view without a refresh.
+    api.post(f"/api/sessions/{sid}/end").raise_for_status()
+    page.locator("#history-view .state", has_text="ended").wait_for(timeout=10_000)
+    page.locator("#history button", has_text="Weekly sync").wait_for()
+    assert "live" not in page.locator("#history button", has_text="Weekly sync").inner_text()
+
+    # History: the session, its export links, deleting it.
     page.locator("#history-view .line").first.wait_for()
     assert page.locator('#history-view a[href$="format=md"]').count() == 1
     shot(page, "07-history")
@@ -185,3 +230,60 @@ def test_gui(server, page):
         "Speaker 1", "Speaker 2", "Speaker 3",
     }
     shot(page, "08-try-speakers")
+
+
+def test_gui_keeps_its_place(server, page):
+    """With two calls live: switching tabs and back keeps each tab's call, a list refresh during a
+    slow open does not take the viewer elsewhere, and a call deleted elsewhere is noticed."""
+    api = httpx.Client(base_url=server, headers={"Authorization": f"Bearer {TOKEN}"})
+    a = api.post("/api/sessions", json={"source": "browser", "title": "Nav A"}).json()["id"]
+    time.sleep(0.05)
+    b = api.post("/api/sessions", json={"source": "browser", "title": "Nav B"}).json()["id"]  # newest
+
+    def say(sid):
+        api.post(
+            f"/api/sessions/{sid}/utterances",
+            files={"file": ("u.wav", JFK.read_bytes(), "audio/wav")},
+            data={"speaker_id": "1", "speaker_name": "Ada", "started_at": str(time.time())},
+        ).raise_for_status()
+
+    title = lambda box: page.locator(f"{box} button.title").inner_text()  # noqa: E731
+
+    # Live opens the newest call; pick the other one, go to History and back: still A.
+    page.get_by_role("tab", name="Live").click()
+    page.locator("#live-sessions button", has_text="Nav A").click()
+    page.locator("#live-transcript button.title", has_text="Nav A").wait_for()
+    page.get_by_role("tab", name="History").click()
+    page.get_by_role("tab", name="Live").click()
+    page.locator("#live-transcript button.title", has_text="Nav A").wait_for()
+    assert page.evaluate("location.hash") == f"#live/{a}"
+    say(a)  # and it follows A again
+    page.locator("#live-transcript .line").first.wait_for(timeout=30_000)
+    page.wait_for_timeout(5000)  # a list refresh or two
+    assert title("#live-transcript") == "Nav A"
+
+    # History: open B, go to Models and back: B is still open, in the URL, and followed.
+    page.get_by_role("tab", name="History").click()
+    page.locator("#history button", has_text="Nav B").click()
+    page.locator("#history-view button.title", has_text="Nav B").wait_for()
+    page.get_by_role("tab", name="Models").click()
+    page.get_by_role("tab", name="History").click()
+    page.locator("#history-view button.title", has_text="Nav B").wait_for()
+    assert page.evaluate("location.hash") == f"#history/{b}"
+    say(b)
+    page.locator("#history-view .line").first.wait_for(timeout=30_000)
+
+    # A slow open (6 s, longer than the 4 s list refresh) still ends on the call clicked.
+    page.get_by_role("tab", name="Live").click()
+    page.locator("#live-transcript button.title", has_text="Nav A").wait_for()
+    page.route(f"**/api/sessions/{b}", lambda route: (time.sleep(6), route.continue_()))
+    page.locator("#live-sessions button", has_text="Nav B").click()
+    page.wait_for_timeout(9000)
+    page.unroute(f"**/api/sessions/{b}")
+    page.locator("#live-transcript button.title", has_text="Nav B").wait_for(timeout=10_000)
+    assert page.evaluate("location.hash") == f"#live/{b}"
+
+    # B is deleted elsewhere: the viewer notices instead of showing it live forever.
+    api.delete(f"/api/sessions/{b}").raise_for_status()
+    page.locator("#live-transcript button.title", has_text="Nav B").wait_for(state="detached", timeout=15_000)
+    api.post(f"/api/sessions/{a}/end").raise_for_status()

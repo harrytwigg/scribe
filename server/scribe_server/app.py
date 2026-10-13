@@ -105,8 +105,18 @@ class Marker(BaseModel):
     text: str
 
 
+def one_line(text: str) -> str:
+    """A name or title as one plain line: runs of whitespace (newlines too) become one space and
+    control characters go, so it cannot break the Markdown export or the page."""
+    return " ".join("".join(c for c in text if c.isprintable() or c.isspace()).split())
+
+
 class Rename(BaseModel):
     name: str
+
+
+class SessionUpdate(BaseModel):
+    title: str
 
 
 class OptOut(BaseModel):
@@ -437,7 +447,25 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}", dependencies=[Depends(guard)])
     def get_session(session_id: str) -> dict:
-        return {**session_or_404(session_id), "utterances": s.store.utterances(session_id)}
+        """The call, its lines, and `speakers`: the names given to speakers in this call."""
+        return {
+            **session_or_404(session_id),
+            "utterances": s.store.utterances(session_id),
+            "speakers": s.store.speaker_names(session_id),
+        }
+
+    @app.patch("/api/sessions/{session_id}", dependencies=[Depends(guard)])
+    async def update_session(session_id: str, body: SessionUpdate) -> dict:  # async: publish
+        """Rename a call (its title in the GUI, exports and the Live tab)."""
+        session_or_404(session_id)
+        title = one_line(body.title)
+        if not title:
+            raise HTTPException(400, "title is empty")
+        if len(title) > 120:
+            raise HTTPException(400, "title is longer than 120 characters")
+        s.store.rename_session(session_id, title)
+        hub.publish(session_id, "title", {"title": title})
+        return s.store.get_session(session_id)
 
     @app.post("/api/sessions/{session_id}/end", dependencies=[Depends(guard)])
     async def end_session(session_id: str) -> dict:  # async: publish on the event loop
@@ -599,7 +627,7 @@ def create_app(services: Services) -> FastAPI:
     async def rename_speaker(session_id: str, speaker_id: str, body: Rename) -> dict:  # async: publish
         """Name a speaker for this session: their lines so far and every later one."""
         session_or_404(session_id)
-        name = body.name.strip()
+        name = one_line(body.name)
         if not name:
             raise HTTPException(400, "name is empty")
         if len(name) > 80:

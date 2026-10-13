@@ -202,6 +202,12 @@ One static page served by the server, no build step:
   Download (with progress), Use (activate), Delete. The active model is marked.
 - **Live**: open sessions, transcript lines streaming in by speaker.
 - **History**: past sessions, export Markdown / SRT / JSON, delete.
+- Live and History share one viewer that follows an open call without a refresh: the SSE stream
+  delivers lines, a poll every 4 s catches anything it missed (lines are keyed by id), and new or
+  ended calls appear in the lists by the same poll. The tab and the open call are in the URL
+  (`#live/<id>`, `#history/<id>`), so a refresh keeps them, and a viewer never jumps to another
+  call on its own. Clicking a call's title renames it (`PATCH /api/sessions/{id}`); clicking a
+  speaker renames them (3.8).
 - **Try it**: upload an audio file or record from the mic, see the transcript and timing, to
   compare models on the same clip.
 

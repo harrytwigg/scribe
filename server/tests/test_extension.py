@@ -28,6 +28,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from .wer import words
+
 pytestmark = pytest.mark.extension
 
 TOKEN = "extension-token"
@@ -228,6 +230,7 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
     assert {line["speaker_name"] for line in by_speaker["mic"]} == {"Harry"}
     for speaker in ("tab", "mic"):
         text = " ".join(line["text"] for line in by_speaker[speaker]).lower()
-        assert PHRASE in text.replace(",", ""), f"{speaker}: {text}"
+        # Words only: punctuation varies with where an utterance was cut ("ask not. what ...").
+        assert " ".join(words(PHRASE)) in " ".join(words(text)), f"{speaker}: {text}"
         assert all(line["model_id"] == "parakeet-tdt-0.6b-v2" for line in by_speaker[speaker])
     (SHOTS / "transcript.json").write_text(json.dumps(got, indent=1))
