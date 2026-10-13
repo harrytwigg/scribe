@@ -209,7 +209,8 @@ One static page served by the server, no build step:
 
 SQLite at `data/scribe.db`: `sessions(id, source, guild, channel, started_at, ended_at, title)`,
 `utterances(id, session_id, speaker_id, speaker_name, started_at, duration_ms, text, model_id,
-asr_ms)`, `optouts(source, user_id)`. Audio is **not** retained by default (`SCRIBE_KEEP_AUDIO`
+asr_ms, client_key)`, `speakers(session_id, speaker_id, name, voice, weight)` (names given in
+the GUI, and diarized speakers' average voices, 3.8), `optouts(source, user_id)`. Audio is **not** retained by default (`SCRIBE_KEEP_AUDIO`
 stores WAVs under `data/audio/` for debugging). Transcripts are kept until deleted (H4).
 
 ### 3.6 Running
@@ -240,6 +241,60 @@ reachable while the box is off is H5.
   transcripts and model controls.
 - The same scheme carries over unchanged behind the phase-2 edge.
 
+### 3.8 Diarization: telling speakers apart in a mixed channel
+
+Discord delivers each user separately. A browser call's tab does not: everyone on the far side
+arrives as one stream. The server splits such a channel into speakers when the client marks the
+utterance `diarize` (the extension does, for the tab channel only).
+
+- **Models**, ONNX on the CPU through **sherpa-onnx** 1.13.8 (Apache-2.0), downloaded on first
+  start into `models/_diarization/` (~45 MB): pyannote **segmentation 3.0** (MIT) finds speaker
+  turns; NVIDIA **TitaNet small** (CC-BY-4.0) gives each turn a voice embedding. Live calls and
+  uploads each have their own worker thread and models, so neither the GPU queue nor a call waits
+  on a long upload. sherpa-onnx carries its own CPU onnxruntime (1.28.2, soname `libonnxruntime.so`,
+  versioned symbols), which loads beside onnxruntime-gpu 1.24.4 (`libonnxruntime.so.1`) without
+  clashing; all 8 models pass with both loaded. (The separate CPU `onnxruntime` wheel that
+  faster-whisper pulls in shares onnxruntime-gpu's package directory, so it is dropped by a uv
+  override, and the install script reinstalls onnxruntime-gpu.)
+- **Live.** Each utterance is split into turns (clustering set to over-split). Each turn of 1 s
+  or more is matched on its own voice against the session's **speaker book**, the running average
+  voice of everyone heard so far; shorter turns are pooled by their clusterer label. A match is
+  cosine similarity >= 0.35 (`SCRIBE_DIARIZE_MATCH`); only a turn of 2 s or more can found a new
+  speaker, and a shorter unmatched one goes to the nearest. Matching per turn against the book
+  matters: one utterance's clustering lumped a short turn in with the next speaker, which the
+  book, built over the whole call, gets right. Where turns overlap (crosstalk), whoever started
+  later has the overlap.
+- **Words, not clips.** The utterance is transcribed once, exactly as without diarization, with
+  word timings (Parakeet's token times, Whisper's word timestamps), and each word goes to the turn
+  it falls in (placed near its start: onnx-asr word ends run on to the next word, into any pause).
+  Transcribing each turn on its own lost words (5.1% WER against 2.0% undiarized: a
+  clip cut at a turn edge loses context, and Parakeet returned nothing for one 3 s turn). Canary
+  gives no timings, so it falls back to a clip per turn, widened to the middle of the gaps around
+  it. Measured: diarized WER equals undiarized on Parakeet (2.0%), Whisper turbo (3.1%) and
+  Canary (4.1%).
+- **Lines.** Each turn is stored as its own line, speaker `tab#1`, `tab#2`, ... named "Speaker 1",
+  ... The book is saved with the session (numbers are never reused), so labels survive a restart.
+  An utterance's turns are kept until its lines are stored, so a retry after a busy queue or a
+  client timeout reuses them, even one arriving while the first attempt is still diarizing (it
+  waits for it): the book never learns the same audio twice and the retry's lines match. If
+  diarization fails or finds no turns, the utterance (or upload) is transcribed as one speaker:
+  speech is never lost to it.
+- **Renaming.** Clicking a name in the GUI renames that speaker for the session, past lines and
+  later ones (`POST /api/sessions/{id}/speakers/{speaker_id}`). This works for any speaker,
+  Discord users included.
+- **Whole recordings.** "Try it" (and `/v1/audio/transcriptions` with `diarize=true`) diarizes an
+  upload in one pass and returns `segments` with speakers.
+- **Measured** (tests/test_diarize_gpu.py and a scratch stress test): a 42 s three-speaker
+  LibriSpeech conversation, live in two utterances, put every turn on the right, consistent
+  speaker. So did a whole-file pass (5 s of CPU for 42 s of audio). Four male speakers taking 16
+  turns, cut into utterances every 12 s or 25 s: 16/16 right. JFK cut into three utterances
+  stayed one speaker. The thresholds came from TitaNet similarities on LibriSpeech test-clean:
+  different speakers peaked at 0.46, and the same speaker's short turns dipped to 0.36.
+- **Limits.** All of that is clean read speech. Meet audio is compressed, and real calls have
+  crosstalk; overlapping speech goes to whoever dominates the turn. A newcomer who only says a word
+  or two is labelled as the nearest known speaker until they speak for 2 s. Until the models load
+  (or if they fail; `/api/status` shows `diarization`), a mixed channel is one speaker, as before.
+
 ## 4. Chrome extension: Meet and any browser call, with no bot (phase 3)
 
 Nothing joins the call. The extension (`extension/`, MV3, no build step) captures the call tab
@@ -257,7 +312,9 @@ and the user's mic in their own browser and posts utterances to the server like 
    still runs Silero VAD on every utterance.
 4. Utterances go to `POST /api/sessions/{id}/utterances` with the bot's retry, idempotency key and
    marker behaviour, in a `browser` session titled after the tab. The tab is speaker `tab`
-   ("Others" by default) and the mic `mic` ("Me"), so "me" vs "them" needs no diarization.
+   ("Others" by default) and the mic `mic` ("Me"), so "me" vs "them" needs no diarization. The tab
+   channel is then diarized on the server (3.8) into "Speaker 1", "Speaker 2", ... (setting
+   "Tell the other side's speakers apart", on by default).
 5. A call ends on **Stop**, when the tab closes, when a new document loads in the captured tab
    (`webNavigation.onCommitted`; capture itself survives navigation), or after 10 minutes with no
    transcribed line on either channel (leaving a Meet call can keep the tab open). Same-document
@@ -286,8 +343,22 @@ cookie) stays same-origin only.
 other server URL (the phase-2 public domain) is requested as an optional permission when it is
 saved in the settings.
 
-**Limits.** Everyone on the far side of the call is one speaker ("Others"): Meet mixes them into
-the tab's audio. Naming them needs diarization, or reading Meet's active-speaker UI (phase 4).
+**What Google and the call can see.** Nothing announces it. Tab capture happens inside Chrome,
+and no web API tells a page that its tab is being captured or that another page has the mic open.
+The extension injects nothing into meet.google.com: no content script, no web-accessible
+resources. So Meet has no known way to detect it, other participants get no "recording" notice
+(that comes only from Meet's own recording or transcription), and no audio goes to Google: it goes
+to harry-box over the tailnet. Three things can show:
+- Chrome's own indicators on Harry's screen: the tab's capture icon, and the mic in use.
+- Echo heard by the far side if Harry is on speakers (above).
+- On a Google Workspace managed browser or profile, the admin can list installed extensions and can
+  block developer-mode extensions or tab capture by policy.
+
+Not being detectable is not consent. Telling people remains Harry's call, and the popup says so.
+
+**Limits.** Meet mixes everyone on the far side into the tab's audio, so telling them apart is
+diarization (3.8), which numbers them; their names are given by renaming in the GUI. Reading
+names from Meet's own speaker UI would need a content script on meet.google.com (not built).
 **Use headphones.** Capturing the tab moves the call's playback out of Meet and into the
 extension, so Meet's own echo cancellation may no longer recognise it. On speakers, the others
 could hear themselves echo, and the mic could repeat the call as "Me" lines. Both are unverified;
@@ -330,7 +401,7 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 | 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on harry-box. Then a soak test; a dedicated Discord application (H1); and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call; the application (H1) |
 | 2 | Public ingress via the tools host + tailnet policy | H3 |
 | 3 | Chrome extension for Meet / any browser call (4): built and tested in Chromium; the first real Meet call is the live test | Load it unpacked and try a call; H3 if off the tailnet |
-| 4 | Diarization for single-stream sources, LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
+| 4 | Diarization for single-stream sources (built: 3.8; a live Meet call is its real test), LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
 
 ## 8. Risks
 

@@ -17,6 +17,8 @@ dependencies = [
   # (docs/spec.md, section 2). CTranslate2 needs the same CUDA 12 / cuDNN 9 libraries.
   "onnxruntime-gpu[cuda,cudnn]==1.24.4",
   "nvidia-cublas-cu12",
+  "sherpa-onnx==1.13.8",
+  "sherpa-onnx-core==1.13.8",
 ]
 
 [dependency-groups]
@@ -43,3 +45,10 @@ markers = [
   "extension: loads the Chrome extension in Chromium against a real server on the GPU",
 ]
 addopts = "-m 'not gpu and not gui and not extension'"
+
+[tool.uv]
+# faster-whisper depends on CPU `onnxruntime` (for its VAD). It installs into the same `onnxruntime`
+# package directory as onnxruntime-gpu, so whichever was installed last wins, and a reinstall could
+# silently leave CPU ORT 1.31 where the GPU 1.24.4 build should be. onnxruntime-gpu provides the
+# same module, so the CPU package is dropped.
+override-dependencies = ["onnxruntime; sys_platform == 'never'"]

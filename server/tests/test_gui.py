@@ -24,6 +24,9 @@ pytestmark = pytest.mark.gui
 
 TOKEN = "gui-token"
 JFK = Path(__file__).parent / "fixtures" / "jfk.wav"
+CONVERSATION = Path(__file__).parent / "fixtures" / "conversation.wav"
+# Text to type into the next prompt() the page opens (renaming a speaker).
+PROMPT_ANSWERS: list[str] = []
 SHOTS = Path(os.environ.get("SCRIBE_GUI_SHOTS", Path(__file__).parents[2] / "evidence" / "gui"))
 # The browser looks like a proxied, non-local client, so it has to sign in like one would over
 # the tailnet or the public edge.
@@ -68,7 +71,7 @@ def page(server):
         browser = p.chromium.launch()
         context = browser.new_context(extra_http_headers=REMOTE, viewport={"width": 1280, "height": 900})
         page = context.new_page()
-        page.on("dialog", lambda dialog: dialog.accept())
+        page.on("dialog", lambda dialog: dialog.accept(PROMPT_ANSWERS.pop(0) if dialog.type == "prompt" and PROMPT_ANSWERS else ""))
         yield page
         browser.close()
 
@@ -150,6 +153,12 @@ def test_gui(server, page):
     assert "Ada" in page.inner_text("#live-transcript")
     shot(page, "06-live")
 
+    # Rename a speaker by clicking their name: the page and the stored lines both change.
+    PROMPT_ANSWERS.append("Ada Lovelace")
+    page.locator("#live-transcript .who").first.click()
+    page.locator("#live-transcript .who", has_text="Ada Lovelace").wait_for()
+    assert api.get(f"/api/sessions/{session['id']}").json()["utterances"][0]["speaker_name"] == "Ada Lovelace"
+
     # History: the session, its export links, deleting it.
     api.post(f"/api/sessions/{session['id']}/end").raise_for_status()
     page.get_by_role("tab", name="History").click()
@@ -160,3 +169,19 @@ def test_gui(server, page):
     page.locator("#history-view").get_by_role("button", name="Delete").click()
     page.get_by_text("Deleted.").wait_for()
     assert api.get(f"/api/sessions/{session['id']}").status_code == 404
+
+    # Try it with speaker separation: the three-speaker conversation comes back as three speakers.
+    deadline = time.time() + 300
+    while api.get("/api/status").json()["diarization"] == "loading" and time.time() < deadline:
+        time.sleep(1)
+    assert api.get("/api/status").json()["diarization"] == "ready"
+    page.get_by_role("tab", name="Try it").click()
+    page.evaluate("document.querySelector('#try-result').replaceChildren()")
+    page.locator("#try-speakers").check()
+    page.locator("#try-file").set_input_files(str(CONVERSATION))
+    page.locator("#try-text .line").first.wait_for(timeout=120_000)
+    assert "3 speakers" in page.inner_text("#try-result")
+    assert {page.locator("#try-text .who").nth(i).inner_text() for i in range(page.locator("#try-text .who").count())} == {
+        "Speaker 1", "Speaker 2", "Speaker 3",
+    }
+    shot(page, "08-try-speakers")

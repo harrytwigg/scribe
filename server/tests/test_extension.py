@@ -71,7 +71,8 @@ def server():
     api = httpx.Client(base_url=base, headers={"Authorization": f"Bearer {TOKEN}"})
     for _ in range(240):
         try:
-            if api.get("/api/status").json().get("active_model"):
+            status = api.get("/api/status").json()
+            if status.get("active_model") and status.get("diarization") == "ready":
                 break
         except (httpx.HTTPError, json.JSONDecodeError):
             pass
@@ -108,7 +109,9 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
         # The manifest's public key pins the ID, and so the origin the server admits.
         assert worker.url.startswith(f"chrome-extension://{EXTENSION_ID}/")
-        config = {"server": server, "token": TOKEN, "myName": "Harry", "othersName": "Meet", "useMic": True}
+        config = {
+            "server": server, "token": TOKEN, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": True,
+        }
 
         # Settings: saved through the options page, which tests the connection.
         options = context.new_page()
@@ -165,11 +168,17 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         logs = []
         page.on("console", lambda message: logs.append(message.text))
         page.goto(f"chrome-extension://{EXTENSION_ID}/src/offscreen.html")
-        page.wait_for_function("globalThis.scribe")
+        # (No wait_for_function here: the extension's CSP forbids the eval it polls with.)
+        page.locator("script[src='offscreen.js']").wait_for(state="attached")
+        for _ in range(100):
+            if page.evaluate("Boolean(globalThis.scribe)"):
+                break
+            time.sleep(0.1)
         page.evaluate(
             """async ([config, clip]) => {
                 const bytes = Uint8Array.from(atob(clip), (c) => c.charCodeAt(0))
                 const audio = new Audio(URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' })))
+                audio.loop = true  // a call keeps going; a clip that ended would end the capture
                 await audio.play()
                 const tab = audio.captureStream()
                 const mic = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -185,10 +194,10 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         deadline = time.time() + 120
         while time.time() < deadline:
             session, got = lines()
-            if {line["speaker_id"] for line in got} >= {"tab", "mic"}:
+            if {line["speaker_id"].split("#")[0] for line in got} >= {"tab", "mic"}:
                 break
             time.sleep(1)
-        popup.wait_for_function("document.querySelector('#detail').textContent.includes('lines')")
+        popup.locator("#detail", has_text="lines").wait_for()
         popup.screenshot(path=str(SHOTS / "01-popup-recording.png"))
         assert session["ended_at"] is None and session["title"] == "Meet - abc-defg-hij"
 
@@ -206,14 +215,16 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         session, got = lines()
         assert session["ended_at"] is not None, "stopping ends the session"
         assert api.get("/api/status").json()["open_sessions"] == 0
-        popup.wait_for_function("document.querySelector('#state').textContent === 'stopped'")
+        popup.locator("#state", has_text="stopped").wait_for()
         context.close()
 
     print(json.dumps([{k: line[k] for k in ("speaker_id", "speaker_name", "text", "model_id")} for line in got], indent=1))
     by_speaker = {}
     for line in got:
-        by_speaker.setdefault(line["speaker_id"], []).append(line)
-    assert {line["speaker_name"] for line in by_speaker["tab"]} == {"Meet"}
+        by_speaker.setdefault(line["speaker_id"].split("#")[0], []).append(line)
+    # The tab mixes everyone on the far side, so it is split into speakers; the mic is just you.
+    assert {line["speaker_id"] for line in by_speaker["tab"]} == {"tab#1"}
+    assert {line["speaker_name"] for line in by_speaker["tab"]} == {"Speaker 1"}
     assert {line["speaker_name"] for line in by_speaker["mic"]} == {"Harry"}
     for speaker in ("tab", "mic"):
         text = " ".join(line["text"] for line in by_speaker[speaker]).lower()

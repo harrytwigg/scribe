@@ -7,6 +7,7 @@ export const DEFAULTS = {
   myName: 'Me',
   othersName: 'Others',
   useMic: true,
+  separateSpeakers: true,
 }
 
 export async function load() {

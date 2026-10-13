@@ -6,8 +6,10 @@ import json
 import logging
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import numpy as np
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -16,8 +18,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
 from . import exports
-from .audio import RATE, AudioError, Vad, decode, speech_chunks
+from .audio import RATE, AudioError, Vad, decode, speech_chunks, speech_spans
 from .auth import COOKIE, Auth
+from .diarize import DiarizerSlot, Speaker, SpeakerBook, Turn
 from .models import Conflict, ModelManager, NoActiveModel, NotFound
 from .store import Store
 from .worker import GpuWorker, QueueFull
@@ -42,6 +45,13 @@ class Services:
     # A browser session with no line or heartbeat for this long is ended: the browser quit or
     # crashed mid-call, and nothing else would end it (docs/spec.md, 4).
     browser_idle_s: float = 300
+    # Splits a channel that mixes several voices into speakers (docs/spec.md, 3.8), and the CPU
+    # thread it runs on, so it never holds up the GPU queue.
+    diarization: DiarizerSlot = field(default_factory=DiarizerSlot)
+    # Live calls and uploaded recordings diarize on separate threads (and models), so a long
+    # upload never holds up a call. Built on first use when not given.
+    diarize_worker: GpuWorker | None = None
+    upload_worker: GpuWorker | None = None
 
 
 @dataclass
@@ -95,6 +105,10 @@ class Marker(BaseModel):
     text: str
 
 
+class Rename(BaseModel):
+    name: str
+
+
 class OptOut(BaseModel):
     source: str
     user_id: str
@@ -135,6 +149,7 @@ def create_app(services: Services) -> FastAPI:
             if now - last_seen.get(session["id"], booted) > s.browser_idle_s:
                 s.store.end_session(session["id"])
                 last_seen.pop(session["id"], None)
+                forget(session["id"])
                 hub.publish(session["id"], "end", s.store.get_session(session["id"]))
                 reaped.append(session["id"])
         if reaped:
@@ -156,6 +171,35 @@ def create_app(services: Services) -> FastAPI:
             tmp.replace(s.open_sessions_file)
 
     write_open_sessions()
+    def cpu(attr: str) -> GpuWorker:
+        if getattr(s, attr) is None:
+            setattr(s, attr, GpuWorker(32, name=attr.replace("_", "-"), label="speaker separation"))
+        return getattr(s, attr)
+
+    # Each session's diarized speakers, loaded from the store on first use. Only the diarize
+    # worker thread changes a book, one utterance at a time.
+    books: dict[str, SpeakerBook] = {}
+    # An utterance's turns and speakers, from diarizing it until its lines are stored: a retry
+    # (after a busy GPU queue, or a client timeout) reuses them rather than diarizing again, so the
+    # book never learns the same audio twice and the retry's lines get the same keys.
+    pending: dict[tuple[str, str], list] = {}
+
+    def forget(session_id: str) -> None:
+        for key in [k for k in books if k.startswith(f"{session_id}/")]:
+            books.pop(key, None)
+        for key in [k for k in pending if k[0] == session_id]:
+            pending.pop(key, None)
+
+    def book_for(session_id: str, prefix: str) -> SpeakerBook:
+        key = f"{session_id}/{prefix}"
+        if key not in books:
+            book = SpeakerBook()
+            for speaker_id, voice, weight in s.store.voices(session_id, f"{prefix}#"):
+                number = int(speaker_id.rsplit("#", 1)[1])
+                book.speakers.append(Speaker(number, np.frombuffer(voice, dtype=np.float32).copy(), weight))
+            book.speakers.sort(key=lambda sp: sp.number)
+            books[key] = book
+        return books[key]
 
     def run_asr(audio) -> Transcript:
         """Runs on the GPU worker thread."""
@@ -175,7 +219,7 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
         return await file.read()
 
-    async def transcribe(data: bytes, model: str | None = None) -> Transcript:
+    async def decode_upload(data: bytes, model: str | None = None) -> np.ndarray:
         if model and model != s.models.active_id:
             raise HTTPException(
                 409, f"model {model!r} is not active; the active model is {s.models.active_id!r} (pick one in the GUI)"
@@ -184,15 +228,75 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(503, "no model is active; pick one in the GUI")
         try:
             # Off the event loop: decoding a long upload must not stall live streams.
-            audio = await asyncio.to_thread(decode, data)
+            return await asyncio.to_thread(decode, data)
         except AudioError as error:
             raise HTTPException(400, str(error)) from error
+
+    async def on_worker(worker: GpuWorker, fn):
         try:
-            return await s.worker.run(lambda: run_asr(audio))
+            return await worker.run(fn)
         except QueueFull as error:
             raise HTTPException(503, str(error), headers={"Retry-After": "1"}) from error
         except NoActiveModel as error:
             raise HTTPException(503, str(error)) from error
+
+    async def transcribe(data: bytes, model: str | None = None) -> Transcript:
+        audio = await decode_upload(data, model)
+        return await on_worker(s.worker, lambda: run_asr(audio))
+
+    def cut(audio: np.ndarray, start: float, end: float) -> np.ndarray:
+        return audio[int(start * RATE) : int(end * RATE)]
+
+    def words_by_turn(audio: np.ndarray, spans: list[tuple[float, float]]) -> list[Transcript] | None:
+        """Runs on the GPU worker. Transcribe the whole utterance once, as without diarization,
+        with word timings, and give each word to the turn it falls in (or the nearest). None if
+        the model has no word timings.
+
+        Transcribing each turn on its own lost words: a short clip cut at a turn edge loses the
+        context, and Parakeet returned nothing at all for one 3 s turn (docs/spec.md, 3.8).
+        """
+        started = time.monotonic()
+        chunks = speech_spans(audio, s.vad)
+        model = s.models.acquire()
+        try:
+            if not getattr(model.engine, "word_timings", False):
+                return None
+            words_of = model.engine.transcribe_words
+            words = []
+            for a, b in chunks:
+                got = words_of(audio[a:b])
+                if got is None:
+                    return None
+                # A word's place is near its start: onnx-asr's word ends run to the next word's
+                # start, so a word before a pause would otherwise land in the pause (and maybe
+                # with the next speaker).
+                words += [(w.text, w.start + min(w.end - w.start, 0.3) / 2 + a / RATE) for w in got]
+        finally:
+            s.models.release(model)
+        texts = [""] * len(spans)
+        for text, t in words:
+            inside = [i for i, (a, b) in enumerate(spans) if a <= t < b]
+            index = inside[0] if inside else min(range(len(spans)), key=lambda i: min(abs(t - spans[i][0]), abs(t - spans[i][1])))
+            texts[index] += text
+        asr_ms = int((time.monotonic() - started) * 1000)
+        return [Transcript(text.strip(), model.id, asr_ms, (b - a)) for text, (a, b) in zip(texts, spans)]
+
+    def each_turn(audio: np.ndarray, spans: list[tuple[float, float]]) -> list[Transcript]:
+        """Runs on the GPU worker, for a model without word timings (Canary): each turn on its
+        own, reaching to the middle of the gaps around it (and the first and last to the ends), so
+        speech the segmenter clipped or missed still reaches the model."""
+        cuts = []
+        for i, (a, b) in enumerate(spans):
+            start = 0.0 if i == 0 else (spans[i - 1][1] + a) / 2
+            end = len(audio) / RATE if i == len(spans) - 1 else (b + spans[i + 1][0]) / 2
+            cuts.append((min(start, a), max(end, b)))
+        return [run_asr(cut(audio, a, b)) for a, b in cuts]
+
+    async def transcribe_turns(audio: np.ndarray, spans: list[tuple[float, float]]) -> list[Transcript]:
+        """The text of each turn, in a single GPU job so a busy queue never splits an utterance."""
+        if not spans:
+            return []
+        return await on_worker(s.worker, lambda: words_by_turn(audio, spans) or each_turn(audio, spans))
 
     # -- auth -----------------------------------------------------------------------------------
 
@@ -224,6 +328,7 @@ def create_app(services: Services) -> FastAPI:
             "loading_model": s.models.loading_id,
             "queue_depth": s.worker.depth,
             "open_sessions": s.store.count_open_sessions(),
+            "diarization": s.diarization.status,
         }
 
     @app.get("/api/models", dependencies=[Depends(guard)])
@@ -260,13 +365,50 @@ def create_app(services: Services) -> FastAPI:
         file: UploadFile = File(...),
         model: str | None = Form(None),
         response_format: str = Form("json"),
+        diarize: bool = Form(False),
     ):
+        """`diarize` (scribe's own field): label who spoke, as `segments` in verbose_json."""
+        if diarize and (diarizer := s.diarization.ready()):
+            return await diarized_file(await read_upload(file), model, response_format, diarizer)
         result = await transcribe(await read_upload(file), model)
         if response_format == "text":
             return PlainTextResponse(result.text)
         if response_format == "verbose_json":
             return {"text": result.text, "model": result.model_id, "duration": result.duration_s, "asr_ms": result.asr_ms}
         return {"text": result.text}
+
+    async def diarized_file(data: bytes, model: str | None, response_format: str, diarizer):
+        started = time.monotonic()
+        audio = await decode_upload(data, model)
+        try:
+            turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio))
+        except HTTPException:
+            raise
+        except Exception:
+            log.exception("diarizing an upload failed; transcribing it as one speaker")
+            turns = []
+        if not turns:  # none found (quiet or distant speech) or failed: one speaker, never no text
+            turns = [(Turn(0, len(audio) / RATE, 0), 1)]
+        results = await transcribe_turns(audio, [(t.start, t.end) for t, _ in turns])
+        kept = [(t, n, r) for (t, n), r in zip(turns, results) if r.text]
+        # Numbered after dropping silent turns, so the names run 1, 2, 3 with no gaps.
+        numbers: dict[int, int] = {}
+        segments = [
+            {"speaker": f"Speaker {numbers.setdefault(n, len(numbers) + 1)}", "start": round(t.start, 2),
+             "end": round(t.end, 2), "text": r.text}
+            for t, n, r in kept
+        ]
+        text = "\n".join(f"{seg['speaker']}: {seg['text']}" for seg in segments)
+        if response_format == "text":
+            return PlainTextResponse(text)
+        if response_format == "verbose_json":
+            model_id = next((r.model_id for r in results if r.model_id), s.models.active_id)
+            return {
+                "text": text, "model": model_id, "duration": len(audio) / RATE,
+                "asr_ms": int((time.monotonic() - started) * 1000), "segments": segments,
+                "speakers": len(numbers),
+            }
+        return {"text": text}
 
     @app.get("/v1/models", dependencies=[Depends(guard)])
     def openai_models() -> dict:
@@ -302,6 +444,7 @@ def create_app(services: Services) -> FastAPI:
         session_or_404(session_id)
         s.store.end_session(session_id)
         last_seen.pop(session_id, None)
+        forget(session_id)
         write_open_sessions()
         session = s.store.get_session(session_id)
         hub.publish(session_id, "end", session)
@@ -320,6 +463,7 @@ def create_app(services: Services) -> FastAPI:
         session_or_404(session_id)
         s.store.delete_session(session_id)
         last_seen.pop(session_id, None)
+        forget(session_id)
         write_open_sessions()
         if s.audio_dir:
             for path in (s.audio_dir / session_id).glob("*.wav"):
@@ -334,29 +478,135 @@ def create_app(services: Services) -> FastAPI:
         speaker_name: str = Form(...),
         started_at: float = Form(...),
         client_key: str | None = Form(None),
+        diarize: bool = Form(False),
     ) -> dict:
-        """`client_key` makes a retry safe: a key already stored returns the stored line."""
+        """`client_key` makes a retry safe: a key already stored returns the stored line.
+
+        `diarize` marks a channel that mixes several voices (a browser call's tab): it is split
+        into speakers `<speaker_id>#1`, `#2`, ... named "Speaker 1", ... until renamed, and the
+        reply lists every line it became under `lines` (docs/spec.md, 3.8). Until diarization is
+        ready, such a channel is transcribed as one speaker.
+        """
         session = session_or_404(session_id)
         if session["ended_at"] is not None:
             raise HTTPException(409, "session has ended")
         touch(session_id)
+        diarizer = s.diarization.ready() if diarize else None
+        if diarizer and client_key and (existing := s.store.utterances_by_key_prefix(session_id, client_key)):
+            return {"text": " ".join(line["text"] for line in existing), "lines": existing}
         if existing := s.store.utterance_by_key(session_id, client_key):
             return existing
         data = await read_upload(file)
-        result = await transcribe(data)
+        audio = await decode_upload(data)
+        if diarizer:
+            reply = await add_diarized(session_id, data, audio, speaker_id, started_at, client_key, diarizer)
+            if reply is not None:
+                return reply
+        result = await on_worker(s.worker, lambda: run_asr(audio))
         if not result.text:
             return {"skipped": True, "reason": "no speech", "duration_s": result.duration_s}
+        name = s.store.speaker_names(session_id).get(speaker_id, speaker_name)
         line, new = s.store.add_utterance(
-            session_id, speaker_id, speaker_name, started_at, int(result.duration_s * 1000),
+            session_id, speaker_id, name, started_at, int(result.duration_s * 1000),
             result.text, result.model_id, result.asr_ms, client_key,
         )
         if new:
-            if s.audio_dir:
-                folder = s.audio_dir / session_id
-                folder.mkdir(parents=True, exist_ok=True)
-                (folder / f"{line['id']}.wav").write_bytes(data)
+            keep_audio(session_id, line, data)
             hub.publish(session_id, "line", line)
         return line
+
+    def keep_audio(session_id: str, line: dict, data: bytes) -> None:
+        if s.audio_dir:
+            folder = s.audio_dir / session_id
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"{line['id']}.wav").write_bytes(data)
+
+    async def diarize_once(key, session_id, audio, speaker_id, diarizer) -> list:
+        """The utterance's (turn, speaker) pairs, diarized once per client_key. [] means "as one
+        speaker". A retry, whether after a busy GPU queue or a client timeout while the first
+        attempt is still running, waits for and reuses the first attempt's pairs: the book learns
+        the audio once and the retry's lines get the same keys."""
+        if key and (first := pending.get(key)) is not None:
+            pairs = await asyncio.shield(first)
+            if pairs is not None:
+                return pairs
+            # The first attempt hit a full queue and gave up before diarizing: go ahead.
+        future = asyncio.get_running_loop().create_future() if key else None
+        if key:
+            pending[key] = future
+            while len(pending) > 256:  # retries that never came
+                pending.pop(next(iter(pending)))
+        book = book_for(session_id, speaker_id)
+        pairs = None  # None until diarized: a waiting retry then diarizes for itself
+        try:
+            try:
+                pairs = await on_worker(cpu("diarize_worker"), lambda: diarizer.turns(audio, book))
+            except HTTPException:  # a full queue: 503, which the client retries
+                raise
+            except Exception:
+                log.exception("diarization failed; transcribing the utterance as one speaker")
+                pairs = []
+            if pairs:
+                # Save the voices now, so the stored book always matches the one in memory.
+                for speaker in {id(sp): sp for _, sp in pairs}.values():
+                    s.store.save_voice(
+                        session_id, f"{speaker_id}#{speaker.number}",
+                        speaker.centroid.astype(np.float32).tobytes(), speaker.weight,
+                    )
+            return pairs
+        finally:
+            # Always resolved, even if this request is cancelled, so a waiting retry never hangs.
+            if key:
+                future.set_result(pairs)
+                if not pairs:
+                    pending.pop(key, None)
+
+    async def add_diarized(session_id, data, audio, speaker_id, started_at, client_key, diarizer) -> dict | None:
+        """Split one utterance into speaker turns and store a line per turn.
+
+        None means "transcribe it as one speaker instead": no turns were found, or diarization
+        failed. A failure here must never lose the speech.
+        """
+        key = (session_id, client_key) if client_key else None
+        pairs = await diarize_once(key, session_id, audio, speaker_id, diarizer)
+        if not pairs:
+            return None
+        results = await transcribe_turns(audio, [(turn.start, turn.end) for turn, _ in pairs])
+        names = s.store.speaker_names(session_id)
+        lines, kept = [], False
+        for index, ((turn, speaker), result) in enumerate(zip(pairs, results)):
+            if not result.text:
+                continue
+            line_speaker = f"{speaker_id}#{speaker.number}"
+            line, new = s.store.add_utterance(
+                session_id, line_speaker, names.get(line_speaker, f"Speaker {speaker.number}"),
+                started_at + turn.start, int(turn.duration * 1000), result.text, result.model_id, result.asr_ms,
+                f"{client_key}#{index}" if client_key else None,
+            )
+            if new:
+                if not kept:
+                    keep_audio(session_id, line, data)
+                    kept = True
+                hub.publish(session_id, "line", line)
+            lines.append(line)
+        if key:
+            pending.pop(key, None)
+        if not lines:
+            return {"skipped": True, "reason": "no speech", "duration_s": len(audio) / RATE}
+        return {"text": " ".join(line["text"] for line in lines), "lines": lines}
+
+    @app.post("/api/sessions/{session_id}/speakers/{speaker_id}", dependencies=[Depends(guard)])
+    async def rename_speaker(session_id: str, speaker_id: str, body: Rename) -> dict:  # async: publish
+        """Name a speaker for this session: their lines so far and every later one."""
+        session_or_404(session_id)
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "name is empty")
+        if len(name) > 80:
+            raise HTTPException(400, "name is longer than 80 characters")
+        changed = s.store.rename_speaker(session_id, speaker_id, name)
+        hub.publish(session_id, "speaker", {"speaker_id": speaker_id, "name": name})
+        return {"speaker_id": speaker_id, "name": name, "lines": changed}
 
     @app.post("/api/sessions/{session_id}/markers", dependencies=[Depends(guard)], status_code=201)
     async def add_marker(session_id: str, body: Marker) -> dict:  # async: publish on the event loop

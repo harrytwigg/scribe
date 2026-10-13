@@ -289,6 +289,15 @@ class ModelManager:
         if unload:
             self._unload(model)
 
+    def shutdown(self) -> None:
+        """Unload the active model (tests, so a GPU suite frees VRAM for the next one)."""
+        with self._lock:
+            model, self._active = self._active, None
+            if model is not None:
+                model.retired = True
+        if model is not None and model.refs == 0:
+            self._unload(model)
+
     def _unload(self, model: LoadedModel) -> None:
         log.info("unloading %s", model.id)
         model.engine.close()

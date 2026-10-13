@@ -17,8 +17,10 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 2. **Models**: download a model and press **Use**. Parakeet TDT 0.6B v2 is the default.
 3. In a Discord voice channel, run `/scribe join`. Lines appear under **Live** as people speak.
    `/scribe stop` ends it (anyone in the call can); `/scribe optout` excludes you for good.
-4. **History** keeps every transcript, with Markdown, SRT and JSON export.
-5. **Try it** transcribes a file with the active model, to compare models on the same clip.
+4. **History** keeps every transcript, with Markdown, SRT and JSON export. Click a speaker's name
+   to rename them for that session.
+5. **Try it** transcribes a file with the active model, to compare models on the same clip. Tick
+   **Separate speakers** to have a recording split into Speaker 1, 2, ...
 
 ### Google Meet (or any call in a browser tab)
 
@@ -27,7 +29,8 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 2. In the extension's **Settings**: the server (`http://harry-box:8787`), the API token and your
    name. Press **Allow microphone** once.
 3. In the Meet tab, click the scribe icon, then **Transcribe this tab**. Lines from the call
-   ("Others") and your mic (your name) appear under **Live** in the GUI. **Stop**, closing or
+   (as Speaker 1, Speaker 2, ...: click a name to rename them) and your mic (your name) appear
+   under **Live** in the GUI. **Stop**, closing or
    leaving the tab, or 10 minutes with no speech ends it.
 
 Use headphones: on speakers, the others may hear themselves echo. Tell people you are
@@ -36,7 +39,9 @@ transcribing: unlike the Discord bot, nothing in the call announces it.
 ## Developing
 
 ```sh
-cd server && uv sync              # Python 3.12, CUDA 12 wheels
+cd server && uv sync --reinstall-package onnxruntime-gpu   # Python 3.12, CUDA 12 wheels; the
+                                  # reinstall repairs a venv that still had the CPU onnxruntime
+                                  # wheel, which shares onnxruntime-gpu's directory
 uv run pytest                     # unit tests (fake engines, no GPU)
 uv run pytest -m gpu -s           # every catalogue model on the GPU (downloads ~16 GB once)
 uv run playwright install chromium && uv run pytest -m gui -s   # the GUI in a browser

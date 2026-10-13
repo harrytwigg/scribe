@@ -28,6 +28,16 @@ create table if not exists utterances (
   asr_ms integer
 );
 create index if not exists utterances_session on utterances(session_id, started_at);
+-- Per-session speakers: a name given in the GUI, and for a diarized channel the speaker's voice
+-- (a unit-length embedding), so the same person keeps their label all call (docs/spec.md, 3.8).
+create table if not exists speakers (
+  session_id text not null references sessions(id) on delete cascade,
+  speaker_id text not null,
+  name text,
+  voice blob,
+  weight real,
+  primary key (session_id, speaker_id)
+);
 create table if not exists optouts (
   source text not null,
   user_id text not null,
@@ -134,8 +144,54 @@ class Store:
             return None
         return self._one("select * from utterances where session_id = ? and client_key = ?", session_id, client_key)
 
+    def utterances_by_key_prefix(self, session_id: str, client_key: str) -> list[dict]:
+        """The lines one diarized utterance became: keys `<client_key>#0`, `#1`, ..."""
+        return self._all(
+            "select * from utterances where session_id = ? and client_key like ? escape '\\' order by started_at, id",
+            session_id, client_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "#%",
+        )
+
     def utterances(self, session_id: str) -> list[dict]:
         return self._all("select * from utterances where session_id = ? order by started_at, id", session_id)
+
+    # -- speakers -------------------------------------------------------------------------------
+
+    def speaker_names(self, session_id: str) -> dict[str, str]:
+        rows = self._all("select speaker_id, name from speakers where session_id = ? and name is not null", session_id)
+        return {row["speaker_id"]: row["name"] for row in rows}
+
+    def voices(self, session_id: str, prefix: str) -> list[tuple[str, bytes, float]]:
+        rows = self._all(
+            "select speaker_id, voice, weight from speakers where session_id = ? and voice is not null", session_id
+        )
+        return [(r["speaker_id"], r["voice"], r["weight"]) for r in rows if r["speaker_id"].startswith(prefix)]
+
+    def save_voice(self, session_id: str, speaker_id: str, voice: bytes, weight: float) -> None:
+        self._exec(
+            "insert into speakers (session_id, speaker_id, voice, weight) values (?, ?, ?, ?) "
+            "on conflict (session_id, speaker_id) do update set voice = excluded.voice, weight = excluded.weight",
+            session_id, speaker_id, voice, weight,
+        )
+
+    def rename_speaker(self, session_id: str, speaker_id: str, name: str) -> int:
+        """Name a speaker for the session: their lines so far, and every line after. Returns lines changed."""
+        with self._lock:
+            self._db.execute("begin")
+            try:
+                self._db.execute(
+                    "insert into speakers (session_id, speaker_id, name) values (?, ?, ?) "
+                    "on conflict (session_id, speaker_id) do update set name = excluded.name",
+                    (session_id, speaker_id, name),
+                )
+                changed = self._db.execute(
+                    "update utterances set speaker_name = ? where session_id = ? and speaker_id = ?",
+                    (name, session_id, speaker_id),
+                ).rowcount
+                self._db.execute("commit")
+            except BaseException:
+                self._db.execute("rollback")
+                raise
+        return changed
 
     # -- opt-outs -------------------------------------------------------------------------------
 

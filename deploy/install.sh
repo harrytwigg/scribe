@@ -19,7 +19,9 @@ rsync -a --delete --exclude .venv --exclude node_modules --exclude dist --exclud
   --exclude .pytest_cache "$repo/server/" "$dest/server/"
 rsync -a --delete --exclude node_modules --exclude dist "$repo/bot/" "$dest/bot/"
 
-(cd "$dest/server" && uv sync --no-dev --frozen)
+# Reinstalling onnxruntime-gpu each time is cheap (uv's cache) and repairs a venv where the CPU
+# onnxruntime package, which shares its directory, was installed or removed over it.
+(cd "$dest/server" && uv sync --no-dev --frozen --reinstall-package onnxruntime-gpu)
 (cd "$dest/bot" && pnpm install --frozen-lockfile && pnpm build)
 
 cp "$repo/deploy/scribe-server.service" "$repo/deploy/scribe-bot.service" "$units/"
