@@ -45,3 +45,10 @@ markers = [
   "extension: loads the Chrome extension in Chromium against a real server on the GPU",
 ]
 addopts = "-m 'not gpu and not gui and not extension'"
+
+[tool.uv]
+# faster-whisper depends on CPU `onnxruntime` (for its VAD). It installs into the same `onnxruntime`
+# package directory as onnxruntime-gpu, so whichever was installed last wins, and a reinstall could
+# silently leave CPU ORT 1.31 where the GPU 1.24.4 build should be. onnxruntime-gpu provides the
+# same module, so the CPU package is dropped.
+override-dependencies = ["onnxruntime; sys_platform == 'never'"]
