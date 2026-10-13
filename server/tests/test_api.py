@@ -391,3 +391,15 @@ def test_open_sessions_file(harness, tmp_path):
     assert harness.services.open_sessions_file.read_text() == "1\n"
     c.post(f"/api/sessions/{sid}/end")
     assert harness.services.open_sessions_file.read_text() == "0\n"
+
+
+def test_rename_session(harness):
+    c = harness.client
+    sid = c.post("/api/sessions", json={"source": "browser", "title": "Meet - abc-defg-hij"}).json()["id"]
+    r = c.patch(f"/api/sessions/{sid}", json={"title": "  Weekly sync  "})
+    assert r.status_code == 200 and r.json()["title"] == "Weekly sync"
+    assert c.get(f"/api/sessions/{sid}").json()["title"] == "Weekly sync"
+    assert c.patch(f"/api/sessions/{sid}", json={"title": " "}).status_code == 400
+    assert c.patch(f"/api/sessions/{sid}", json={"title": "x" * 121}).status_code == 400
+    assert c.patch("/api/sessions/nope", json={"title": "x"}).status_code == 404
+    assert harness.anonymous.patch(f"/api/sessions/{sid}", json={"title": "x"}).status_code == 401

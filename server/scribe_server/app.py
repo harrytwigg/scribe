@@ -109,6 +109,10 @@ class Rename(BaseModel):
     name: str
 
 
+class SessionUpdate(BaseModel):
+    title: str
+
+
 class OptOut(BaseModel):
     source: str
     user_id: str
@@ -438,6 +442,19 @@ def create_app(services: Services) -> FastAPI:
     @app.get("/api/sessions/{session_id}", dependencies=[Depends(guard)])
     def get_session(session_id: str) -> dict:
         return {**session_or_404(session_id), "utterances": s.store.utterances(session_id)}
+
+    @app.patch("/api/sessions/{session_id}", dependencies=[Depends(guard)])
+    async def update_session(session_id: str, body: SessionUpdate) -> dict:  # async: publish
+        """Rename a call (its title in the GUI, exports and the Live tab)."""
+        session_or_404(session_id)
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(400, "title is empty")
+        if len(title) > 120:
+            raise HTTPException(400, "title is longer than 120 characters")
+        s.store.rename_session(session_id, title)
+        hub.publish(session_id, "title", {"title": title})
+        return s.store.get_session(session_id)
 
     @app.post("/api/sessions/{session_id}/end", dependencies=[Depends(guard)])
     async def end_session(session_id: str) -> dict:  # async: publish on the event loop
