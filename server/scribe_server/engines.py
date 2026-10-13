@@ -18,6 +18,8 @@ class Word:
 
 
 class Engine(Protocol):
+    word_timings: bool  # transcribe_words works (see below)
+
     def transcribe(self, audio: np.ndarray) -> str: ...
 
     # Optional: the same transcript with word timings, so a diarized utterance is transcribed once
@@ -34,6 +36,7 @@ class FasterWhisperEngine:
         compute_type = "float16" if device == "cuda" else "int8"
         self._model = WhisperModel(str(path), device=device, compute_type=compute_type)
         self._language = entry.language
+        self.word_timings = True
 
     def transcribe(self, audio: np.ndarray) -> str:
         segments, _ = self._model.transcribe(
@@ -79,6 +82,9 @@ class OnnxAsrEngine:
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device == "cuda" else ["CPUExecutionProvider"]
         self._model = onnx_asr.load_model(entry.onnx_type, str(path), providers=providers)
         self._timed = self._model.with_timestamps()
+        # Decided once here, not by trying each utterance: Canary's decoder gives no token times,
+        # and finding that out costs a whole ASR pass that is then thrown away.
+        self.word_timings = "canary" not in (entry.onnx_type or "")
 
     def transcribe(self, audio: np.ndarray) -> str:
         result = self._model.recognize(audio, sample_rate=16_000)

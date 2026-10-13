@@ -313,6 +313,7 @@ def test_words_go_to_the_turn_they_fall_in(tmp_path, monkeypatch):
         return [Word(f" w{i / 2:g}", i / 2, i / 2 + 0.4) for i in range(int(len(audio) / RATE * 2))]
 
     monkeypatch.setattr(FakeEngine, "transcribe_words", transcribe_words, raising=False)
+    monkeypatch.setattr(FakeEngine, "word_timings", True, raising=False)
     h = diarized(tmp_path)
     c = h.client
     sid = c.post("/api/sessions", json={"source": "browser"}).json()["id"]
@@ -326,3 +327,52 @@ def test_words_go_to_the_turn_they_fall_in(tmp_path, monkeypatch):
         ("tab#2", "w2.5 w3 w3.5 w4 w4.5"),
     ]
     assert sum(e.calls for e in h.loader.engines.values()) == 0  # never transcribed per turn
+
+
+# -- review round 2 ---------------------------------------------------------------------------
+
+
+def test_a_diarized_upload_with_no_turns_is_still_transcribed(tmp_path):
+    h = diarized(tmp_path)
+    h.services.diarization.value.whole = lambda audio: []  # pyannote heard nothing; VAD and ASR do
+    r = h.client.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
+                      files={"file": ("a.wav", wav(pitch(300, 2)))}).json()
+    assert r["text"] == "Speaker 1: alpha: 2.0s" and r["speakers"] == 1
+
+
+def test_a_retry_while_the_first_attempt_is_diarizing_waits_for_it(tmp_path):
+    """The client timed out and retried while the first attempt was still on the CPU worker: the
+    retry must reuse the first attempt's turns, not diarize (and learn) the audio again."""
+    import asyncio
+    import time as clock
+
+    import httpx
+
+    h = diarized(tmp_path)
+    fake = h.services.diarization.value
+    real_turns = fake.turns
+    runs = []
+
+    def slow_turns(audio, book):
+        runs.append(1)
+        clock.sleep(0.3)
+        return real_turns(audio, book)
+
+    fake.turns = slow_turns
+    sid = h.client.post("/api/sessions", json={"source": "browser"}).json()["id"]
+    audio = wav(np.concatenate([pitch(300, 2.5), silence(1), pitch(700, 2.5), silence(0.5)]))
+    form = {"speaker_id": "tab", "speaker_name": "Others", "started_at": "1", "diarize": "true", "client_key": "k1"}
+
+    async def both():
+        transport = httpx.ASGITransport(app=h.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", headers=dict(h.client.headers)) as c:
+            post = lambda: c.post(f"/api/sessions/{sid}/utterances", data=form, files={"file": ("u.wav", audio)})  # noqa: E731
+            first = asyncio.ensure_future(post())
+            await asyncio.sleep(0.1)  # the first is now diarizing
+            return await asyncio.gather(first, post())
+
+    first, retry = asyncio.run(both())
+    assert first.status_code == retry.status_code == 201
+    assert len(runs) == 1
+    assert [l["id"] for l in first.json()["lines"]] == [l["id"] for l in retry.json()["lines"]]
+    assert {sid_: w for sid_, _, w in h.services.store.voices(sid, "tab#")} == {"tab#1": 2.5, "tab#2": 2.5}

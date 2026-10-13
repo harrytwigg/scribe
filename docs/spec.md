@@ -266,7 +266,8 @@ utterance `diarize` (the extension does, for the tab channel only).
   later has the overlap.
 - **Words, not clips.** The utterance is transcribed once, exactly as without diarization, with
   word timings (Parakeet's token times, Whisper's word timestamps), and each word goes to the turn
-  it falls in. Transcribing each turn on its own lost words (5.1% WER against 2.0% undiarized: a
+  it falls in (placed near its start: onnx-asr word ends run on to the next word, into any pause).
+  Transcribing each turn on its own lost words (5.1% WER against 2.0% undiarized: a
   clip cut at a turn edge loses context, and Parakeet returned nothing for one 3 s turn). Canary
   gives no timings, so it falls back to a clip per turn, widened to the middle of the gaps around
   it. Measured: diarized WER equals undiarized on Parakeet (2.0%), Whisper turbo (3.1%) and
@@ -274,9 +275,10 @@ utterance `diarize` (the extension does, for the tab channel only).
 - **Lines.** Each turn is stored as its own line, speaker `tab#1`, `tab#2`, ... named "Speaker 1",
   ... The book is saved with the session (numbers are never reused), so labels survive a restart.
   An utterance's turns are kept until its lines are stored, so a retry after a busy queue or a
-  client timeout reuses them: the book never learns the same audio twice and the retry's lines
-  match. If diarization fails, the utterance is transcribed as one speaker: speech is never lost
-  to it.
+  client timeout reuses them, even one arriving while the first attempt is still diarizing (it
+  waits for it): the book never learns the same audio twice and the retry's lines match. If
+  diarization fails or finds no turns, the utterance (or upload) is transcribed as one speaker:
+  speech is never lost to it.
 - **Renaming.** Clicking a name in the GUI renames that speaker for the session, past lines and
   later ones (`POST /api/sessions/{id}/speakers/{speaker_id}`). This works for any speaker,
   Discord users included.

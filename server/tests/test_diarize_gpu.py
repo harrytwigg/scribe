@@ -45,6 +45,8 @@ def client(tmp_path_factory):
         time.sleep(1)
     assert client.get("/api/status").json()["diarization"] == "ready"
     yield client
+    # Free the VRAM for the next GPU test module (the live server may hold a model too).
+    services.models.shutdown()
     services.worker.stop()
 
 
@@ -72,7 +74,8 @@ def assert_consistent(found):
 
 
 def use(client, model_id):
-    client.post(f"/api/models/{model_id}/activate")
+    r = client.post(f"/api/models/{model_id}/activate")
+    assert r.status_code == 202, r.text
     deadline = time.monotonic() + 600
     while client.get("/api/status").json()["active_model"] != model_id:
         assert time.monotonic() < deadline, f"{model_id} did not activate"

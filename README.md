@@ -39,7 +39,9 @@ transcribing: unlike the Discord bot, nothing in the call announces it.
 ## Developing
 
 ```sh
-cd server && uv sync              # Python 3.12, CUDA 12 wheels
+cd server && uv sync --reinstall-package onnxruntime-gpu   # Python 3.12, CUDA 12 wheels; the
+                                  # reinstall repairs a venv that still had the CPU onnxruntime
+                                  # wheel, which shares onnxruntime-gpu's directory
 uv run pytest                     # unit tests (fake engines, no GPU)
 uv run pytest -m gpu -s           # every catalogue model on the GPU (downloads ~16 GB once)
 uv run playwright install chromium && uv run pytest -m gui -s   # the GUI in a browser

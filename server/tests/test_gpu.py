@@ -41,6 +41,7 @@ def client(tmp_path_factory):
     services = build(settings)
     # The host allowlist (DNS-rebinding guard) admits localhost, not TestClient's "testserver".
     yield TestClient(create_app(services), base_url="http://localhost"), services
+    services.models.shutdown()  # free the VRAM for the next GPU test module
     services.worker.stop()
 
 

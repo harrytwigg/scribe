@@ -259,15 +259,18 @@ def create_app(services: Services) -> FastAPI:
         chunks = speech_spans(audio, s.vad)
         model = s.models.acquire()
         try:
-            words_of = getattr(model.engine, "transcribe_words", None)
-            if words_of is None:
+            if not getattr(model.engine, "word_timings", False):
                 return None
+            words_of = model.engine.transcribe_words
             words = []
             for a, b in chunks:
                 got = words_of(audio[a:b])
                 if got is None:
                     return None
-                words += [(w.text, (w.start + w.end) / 2 + a / RATE) for w in got]
+                # A word's place is near its start: onnx-asr's word ends run to the next word's
+                # start, so a word before a pause would otherwise land in the pause (and maybe
+                # with the next speaker).
+                words += [(w.text, w.start + min(w.end - w.start, 0.3) / 2 + a / RATE) for w in got]
         finally:
             s.models.release(model)
         texts = [""] * len(spans)
@@ -383,6 +386,8 @@ def create_app(services: Services) -> FastAPI:
             raise
         except Exception:
             log.exception("diarizing an upload failed; transcribing it as one speaker")
+            turns = []
+        if not turns:  # none found (quiet or distant speech) or failed: one speaker, never no text
             turns = [(Turn(0, len(audio) / RATE, 0), 1)]
         results = await transcribe_turns(audio, [(t.start, t.end) for t, _ in turns])
         kept = [(t, n, r) for (t, n), r in zip(turns, results) if r.text]
@@ -516,6 +521,46 @@ def create_app(services: Services) -> FastAPI:
             folder.mkdir(parents=True, exist_ok=True)
             (folder / f"{line['id']}.wav").write_bytes(data)
 
+    async def diarize_once(key, session_id, audio, speaker_id, diarizer) -> list:
+        """The utterance's (turn, speaker) pairs, diarized once per client_key. [] means "as one
+        speaker". A retry, whether after a busy GPU queue or a client timeout while the first
+        attempt is still running, waits for and reuses the first attempt's pairs: the book learns
+        the audio once and the retry's lines get the same keys."""
+        if key and (first := pending.get(key)) is not None:
+            pairs = await asyncio.shield(first)
+            if pairs is not None:
+                return pairs
+            # The first attempt hit a full queue and gave up before diarizing: go ahead.
+        future = asyncio.get_running_loop().create_future() if key else None
+        if key:
+            pending[key] = future
+            while len(pending) > 256:  # retries that never came
+                pending.pop(next(iter(pending)))
+        book = book_for(session_id, speaker_id)
+        pairs = None  # None until diarized: a waiting retry then diarizes for itself
+        try:
+            try:
+                pairs = await on_worker(cpu("diarize_worker"), lambda: diarizer.turns(audio, book))
+            except HTTPException:  # a full queue: 503, which the client retries
+                raise
+            except Exception:
+                log.exception("diarization failed; transcribing the utterance as one speaker")
+                pairs = []
+            if pairs:
+                # Save the voices now, so the stored book always matches the one in memory.
+                for speaker in {id(sp): sp for _, sp in pairs}.values():
+                    s.store.save_voice(
+                        session_id, f"{speaker_id}#{speaker.number}",
+                        speaker.centroid.astype(np.float32).tobytes(), speaker.weight,
+                    )
+            return pairs
+        finally:
+            # Always resolved, even if this request is cancelled, so a waiting retry never hangs.
+            if key:
+                future.set_result(pairs)
+                if not pairs:
+                    pending.pop(key, None)
+
     async def add_diarized(session_id, data, audio, speaker_id, started_at, client_key, diarizer) -> dict | None:
         """Split one utterance into speaker turns and store a line per turn.
 
@@ -523,27 +568,9 @@ def create_app(services: Services) -> FastAPI:
         failed. A failure here must never lose the speech.
         """
         key = (session_id, client_key) if client_key else None
-        pairs = pending.get(key) if key else None
-        if pairs is None:
-            book = book_for(session_id, speaker_id)
-            try:
-                pairs = await on_worker(cpu("diarize_worker"), lambda: diarizer.turns(audio, book))
-            except HTTPException:
-                raise  # a full queue: 503, which the client retries
-            except Exception:
-                log.exception("diarization failed; transcribing the utterance as one speaker")
-                return None
-            if not pairs:
-                return None
-            # Save the voices now, so the stored book always matches the one in memory.
-            for speaker in {id(sp): sp for _, sp in pairs}.values():
-                s.store.save_voice(
-                    session_id, f"{speaker_id}#{speaker.number}", speaker.centroid.astype(np.float32).tobytes(), speaker.weight
-                )
-            if key:
-                pending[key] = pairs
-                while len(pending) > 256:  # retries that never came
-                    pending.pop(next(iter(pending)))
+        pairs = await diarize_once(key, session_id, audio, speaker_id, diarizer)
+        if not pairs:
+            return None
         results = await transcribe_turns(audio, [(turn.start, turn.end) for turn, _ in pairs])
         names = s.store.speaker_names(session_id)
         lines, kept = [], False
