@@ -1,0 +1,26 @@
+diff --git a/dist/index.js b/dist/index.js
+index 63c6dfbaeb145f4ec332784ce5a80bb534fb8905..3eef1f5f03e0fd909af75bfe25c7d9a9b1cb67cb 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -957,7 +957,7 @@ var DAVESession = class extends import_node_events2.EventEmitter {
+         this.consecutiveFailures++;
+         this.emit("debug", `Failed to decrypt a packet (${this.consecutiveFailures} consecutive fails)`);
+         if (this.consecutiveFailures > this.failureTolerance) {
+-          if (this.lastTransitionId) this.recoverFromInvalidTransition(this.lastTransitionId);
++          if (this.lastTransitionId !== void 0) this.recoverFromInvalidTransition(this.lastTransitionId);
+           else throw error;
+         }
+       } else if (this.reinitializing) {
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 4a5678cf6efbd76a00efaa0c1218aa6fb8cccffe..76d6c086d38c452120f9637fae5e2e7d5d2f3cc3 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -897,7 +897,7 @@ var DAVESession = class extends EventEmitter2 {
+         this.consecutiveFailures++;
+         this.emit("debug", `Failed to decrypt a packet (${this.consecutiveFailures} consecutive fails)`);
+         if (this.consecutiveFailures > this.failureTolerance) {
+-          if (this.lastTransitionId) this.recoverFromInvalidTransition(this.lastTransitionId);
++          if (this.lastTransitionId !== void 0) this.recoverFromInvalidTransition(this.lastTransitionId);
+           else throw error;
+         }
+       } else if (this.reinitializing) {

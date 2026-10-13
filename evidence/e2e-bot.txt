@@ -1,0 +1,20 @@
+$ vitest run --config vitest.e2e.config.ts
+
+ RUN  v3.2.7 /srv/jinn-work/main/scribe-mvp/bot
+
+stdout | test/scribe.e2e.test.ts > replayed call -> bot pipeline -> scribe server > transcribes two overlapping speakers, with a model swap mid-call
+Ada [parakeet-tdt-0.6b-v2] And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.
+Bob [parakeet-tdt-0.6b-v2] mister Quilter is the Apostle of the Middle Classes, and we are glad to welcome his gospel.
+Bob [whisper-large-v3-turbo] he tells us that at this festive season of the year with christmas and roast beef looming before us similes drawn from eating and its results occur most readily to the mind
+Ada [whisper-large-v3-turbo] And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.
+Bob [whisper-large-v3-turbo] linnell's pictures are a sort of up guards and adam paintings and mason's exquisite idles are as national as a jingo poem mr burkett foster's landscapes smile at one much in the same way that mr carker used to flash his teeth and mr john collier gives his sitter a cheerful slap on the back before he
+Bob [whisper-large-v3-turbo] says, like a shampooer in a Turkish bath. Next man!
+
+ ✓ test/scribe.e2e.test.ts (1 test) 32350ms
+   ✓ replayed call -> bot pipeline -> scribe server > transcribes two overlapping speakers, with a model swap mid-call  28598ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  23:33:11
+   Duration  32.81s (transform 100ms, setup 0ms, collect 109ms, tests 32.35s, environment 0ms, prepare 112ms)
+
