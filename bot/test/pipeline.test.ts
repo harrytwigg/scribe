@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import type { ScribeClient, Speaker } from '../src/client.js'
 import { durationMs } from '../src/pcm.js'
-import { Pipeline } from '../src/pipeline.js'
-import { ReplaySource } from '../src/replay.js'
+import { Pipeline, isEncryptedFrame } from '../src/pipeline.js'
+import { ReplaySource, encodeOpus, encryptedFrames } from '../src/replay.js'
 
 // A tone, so Opus keeps real signal through the round trip.
 function tone(ms: number, hz: number) {
@@ -75,6 +75,95 @@ describe('Pipeline with a replayed call', () => {
     expect(client.posts).toHaveLength(1)
     expect(client.posts[0].ms).toBeGreaterThan(1000)
     expect(client.posts[0].ms).toBeLessThan(2000)
+  })
+})
+
+describe('Pipeline with undecodable packets', () => {
+  it('keeps hearing a speaker whose first packet cannot be decoded', async () => {
+    // One bad packet as the bot joined used to destroy that user's decoder: they were never heard
+    // again for the rest of the call, while everyone else was.
+    const source = new ReplaySource(
+      [
+        { userId: 'harry', pcm: tone(2000, 300), atMs: 0, corruptFirst: 1 },
+        { userId: 'badger', pcm: tone(2000, 500), atMs: 200 },
+        { userId: 'harry', pcm: tone(1500, 300), atMs: 4000 },
+      ],
+      20,
+    )
+    const client = new RecordingClient()
+    const errors: string[] = []
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: () => false,
+      onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+    })
+    await source.play()
+    await pipeline.stop()
+    const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
+    expect(byUser('harry')).toEqual([2000, 1500])
+    expect(byUser('badger')).toEqual([2000])
+    expect(pipeline.heard.get('harry')).toMatchObject({ corrupt: 1, encrypted: 0, lines: 2 })
+    expect(errors).toEqual(['skipped 1 undecodable packet(s) from harry'])
+  })
+
+  it('loses only the bad packets, not the speech after them', async () => {
+    const source = new ReplaySource([{ userId: 'a', pcm: tone(1000, 300), atMs: 0, corruptFirst: 5 }], 20)
+    const client = new RecordingClient()
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: () => false,
+    })
+    await source.play()
+    await pipeline.stop()
+    expect(client.posts.map((p) => Math.round(p.ms / 100) * 100)).toEqual([1000])
+  })
+})
+
+describe('Pipeline with frames it cannot decrypt', () => {
+  it('never decodes DAVE-encrypted frames, and keeps hearing everyone', async () => {
+    // 10 s of frames still encrypted (the bot joined before it could decrypt this speaker). Half
+    // of them decode as noise, which would be posted as speech, and decoding enough of them
+    // corrupts the heap every decoder shares, silencing everyone else too.
+    const source = new ReplaySource(
+      [
+        { userId: 'harry', pcm: tone(1000, 300), atMs: 0, encryptedFirst: 500 },
+        { userId: 'badger', pcm: tone(2000, 500), atMs: 11_000 },
+        { userId: 'harry', pcm: tone(1500, 300), atMs: 14_000 },
+      ],
+      20,
+    )
+    const client = new RecordingClient()
+    const pipeline = new Pipeline({
+      source,
+      client: client as unknown as ScribeClient,
+      sessionId: 's',
+      speaker: (id) => ({ id, name: id }),
+      isOptedOut: () => false,
+    })
+    await source.play()
+    await pipeline.stop()
+    const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
+    // Only the real speech: none of the encrypted frames became audio.
+    expect(byUser('harry')).toEqual([1000, 1500])
+    expect(byUser('badger')).toEqual([2000])
+    expect(pipeline.heard.get('harry')).toMatchObject({ encrypted: 500, corrupt: 0 })
+  })
+})
+
+describe('isEncryptedFrame', () => {
+  it('matches DAVE frames and not real Opus that happens to end in 0xFAFA', () => {
+    expect(encryptedFrames(200, 7).every(isEncryptedFrame)).toBe(true)
+    // Opus ends in 0xFAFA far more often than chance; the trailer size byte tells them apart.
+    const real = encodeOpus(tone(60_000, 300))
+    expect(real.filter(isEncryptedFrame).length).toBeLessThanOrEqual(1)
+    const lookalike = Buffer.concat([Buffer.alloc(40, 0x11), Buffer.from([0x03, 0xfa, 0xfa])])
+    expect(isEncryptedFrame(lookalike)).toBe(false)
   })
 })
 

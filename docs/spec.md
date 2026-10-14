@@ -127,7 +127,14 @@ This is a public-exposure decision and needs Harry (H3).
    sets its nickname to "🔴 transcribing", posts a notice in the channel's text chat, and opens a
    server session (`POST /api/sessions`).
 2. On each `speaking.start` from a user who has not opted out, the bot subscribes to that user's
-   Opus stream, ending after 800 ms of silence, and decodes to 48 kHz stereo PCM.
+   Opus stream, ending after 800 ms of silence, and decodes to 48 kHz stereo PCM. Each packet is
+   decoded on its own and one that will not decode is skipped, because a stream decoder that
+   errors stops for good, which once lost a whole speaker for a call. Frames still DAVE-encrypted
+   (passed through when the bot cannot decrypt them yet, just after joining or mid key change;
+   they end in the 0xFAFA marker) are dropped before decoding: half of them decode as noise, and
+   decoding many corrupts the shared Opus decoder's memory. `/scribe status` lists each
+   person in the call and how many lines of theirs were transcribed, so a missing speaker shows
+   during the call rather than after it.
 3. An utterance is cut at the silence or at **25 s**, whichever comes first. Utterances shorter
    than **400 ms** are dropped (keyboard, breath). Each is downmixed to mono, wrapped as a 48 kHz
    WAV (the server resamples to 16 kHz), and posted to `POST /api/sessions/{id}/utterances` with the speaker's id,

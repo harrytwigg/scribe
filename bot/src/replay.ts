@@ -20,7 +20,43 @@ export interface ReplayClip {
   pcm: Buffer
   /** When the user starts speaking, ms after `play()` (scaled by `speed`). */
   atMs: number
+  /**
+   * Undecodable packets sent ahead of the speech, as Discord delivers a DAVE frame the bot cannot
+   * decrypt yet (just after joining, or mid key change).
+   */
+  corruptFirst?: number
+  /**
+   * DAVE-encrypted frames sent ahead of the speech, as @discordjs/voice hands them through when it
+   * cannot decrypt them yet: random bytes ending in a DAVE trailer and the 0xFAFA marker. About half of them would
+   * "decode" as noise. Seeded, so a test sees the same frames every run.
+   */
+  encryptedFirst?: number
 }
+
+/** `count` frames shaped like DAVE ciphertext, from a small seeded generator (mulberry32). */
+export function encryptedFrames(count: number, seed = 1): Buffer[] {
+  let state = seed >>> 0
+  const random = () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = state
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  return Array.from({ length: count }, () => {
+    // Ciphertext, an 8-byte tag, a 1-byte nonce, the trailer size (12) and the marker.
+    const frame = Buffer.alloc(40 + Math.floor(random() * 120))
+    for (let i = 0; i < frame.length - 3; i++) frame[i] = Math.floor(random() * 256)
+    frame[frame.length - 4] &= 0x7f // the nonce, ULEB128: one byte
+    frame[frame.length - 3] = 12
+    frame[frame.length - 2] = 0xfa
+    frame[frame.length - 1] = 0xfa
+    return frame
+  })
+}
+
+/** Not an Opus packet: what an encrypted DAVE frame looks like to the decoder. */
+const CORRUPT_PACKET = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x01, 0x02, 0x03])
 
 /** Read a 16-bit PCM WAV and return it as 48 kHz stereo s16le (linear-interpolated). */
 export function loadWav(path: string): Buffer {
@@ -117,7 +153,11 @@ export class ReplaySource implements VoiceSource {
   /** Play every clip; resolves when all have finished. Clips of one user must not overlap. */
   async play(): Promise<void> {
     // Encode first, so encoding time does not shift the timeline.
-    const encoded = this.clips.map((clip) => encodeOpus(clip.pcm))
+    const encoded = this.clips.map((clip) => [
+      ...Array<Buffer>(clip.corruptFirst ?? 0).fill(CORRUPT_PACKET),
+      ...encryptedFrames(clip.encryptedFirst ?? 0),
+      ...encodeOpus(clip.pcm),
+    ])
     await Promise.all(this.clips.map((clip, i) => this.speak(clip, encoded[i])))
   }
 }
