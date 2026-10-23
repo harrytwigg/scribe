@@ -14,7 +14,8 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 
 ## Using it
 
-1. Open the GUI (`http://harry-box:8787` on the tailnet) and sign in with `SCRIBE_API_TOKEN`.
+1. Open the GUI (`http://harry-box:8787` on the tailnet) and sign in with `SCRIBE_API_TOKEN`. On the machine running the server
+   with `SCRIBE_TRUST_LOCALHOST=1` (harry-box has it), no sign-in is needed there.
 2. **Models**: download a model and press **Use**. Parakeet TDT 0.6B v2 is the default.
 3. In a Discord voice channel, run `/scribe join`. Lines appear under **Live** as people speak.
    `/scribe stop` ends it (anyone in the call can); `/scribe optout` excludes you for good.
