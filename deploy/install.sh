@@ -24,6 +24,10 @@ rsync -a --delete --exclude node_modules --exclude dist "$repo/bot/" "$dest/bot/
 (cd "$dest/server" && uv sync --no-dev --frozen --reinstall-package onnxruntime-gpu)
 (cd "$dest/bot" && pnpm install --frozen-lockfile && pnpm build)
 
+# The `scribe` command (docs/cli.md) runs from the server's virtualenv.
+mkdir -p "$HOME/.local/bin"
+ln -sf "$dest/server/.venv/bin/scribe" "$HOME/.local/bin/scribe"
+
 cp "$repo/deploy/scribe-server.service" "$repo/deploy/scribe-bot.service" "$units/"
 systemctl --user daemon-reload
 systemctl --user enable scribe-server.service scribe-bot.service

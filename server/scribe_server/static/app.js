@@ -531,6 +531,7 @@ $('#tx-form').addEventListener('submit', async (event) => {
   if (!file && !link) return txFail('Choose an audio file or paste a podcast link.');
   if (file && link) return txFail('Use either a file or a link, not both.');
   const diarize = $('#tx-speakers').checked;
+  $('#tx-file').value = ''; // sent below; the next run starts from an empty form
   $('#tx-result').replaceChildren();
   txBusy(true);
   try {
