@@ -161,6 +161,14 @@ def resolve_source(source: str, nth: int, quiet: bool) -> podcast.Episode:
     except podcast.PodcastError as error:
         raise CliError(str(error), NOT_FOUND, "not_found") from error
     say(f"found {describe(episode)} [{episode.source}] {episode.audio_url}", quiet)
+    match = episode.match
+    if match and (match["date"] is False or match["duration"] is False or (match["date"] is None and match["duration"] is None)):
+        # Always shown, even with -q: it is the one case where the audio may not be the episode asked for.
+        print(
+            f"scribe: warning: weak match for {describe(episode)}: title {match['title']}, date "
+            f"{match['date']}, duration {match['duration']}; check it is the episode you wanted "
+            f"(`scribe resolve` shows it; pass the feed URL with --episode N to be sure)", file=sys.stderr,
+        )
     return episode
 
 
@@ -270,19 +278,19 @@ def render_text(result: dict, timestamps: bool, speakers: bool) -> str:
 
 def cmd_transcribe(args) -> int:
     quiet = args.quiet
+    local = Path(args.source).expanduser()
+    if not local.is_file() and not looks_like_link(args.source):
+        raise CliError(f"{args.source!r} is neither a file that exists nor a link", USAGE, "usage")
     server = Server(server_url(args.server), api_token(args.token))
     check_server(server)
     episode = None
     with tempfile.TemporaryDirectory(prefix="scribe-") as scratch:
-        local = Path(args.source).expanduser()
         if local.is_file():
             audio, title = local, local.stem
-        elif looks_like_link(args.source):
+        else:
             episode = resolve_source(args.source, args.episode, quiet)
             audio = fetch_audio(episode, Path(args.keep_audio) if args.keep_audio else Path(scratch), quiet)
             title = f"{episode.show}: {episode.title}" if episode.show else episode.title
-        else:
-            raise CliError(f"{args.source!r} is neither a file that exists nor a link", USAGE, "usage")
         job = transcribe_file(server, audio, title, args.speakers, quiet)
     result, session_id = job["result"], job["session_id"]
     if args.format in ("srt", "md"):

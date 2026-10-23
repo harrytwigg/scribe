@@ -194,3 +194,22 @@ def test_no_active_model_is_reported_up_front(served, tmp_path, monkeypatch, cap
     path.write_bytes(AUDIO)
     code, _, err = run(capsys, "transcribe", str(path), "-q")
     assert code == 5 and "no active model" in err
+
+
+def test_usage_errors_come_before_the_server_is_contacted(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("SCRIBE_URL", "http://127.0.0.1:1")
+    assert run(capsys, "transcribe", str(tmp_path / "missing.mp3"))[0] == 2
+
+
+def test_a_weak_match_is_warned_about_even_when_quiet(served, monkeypatch, capsys):
+    pages = spotify_pages()
+    # the feed's episode has the right title but no date or length to confirm it
+    pages[FEED_A] = feed("The Show", [("The Big Idea", None, "", "https://cdn.example.com/12.mp3")])
+    pages["https://cdn.example.com/12.mp3"] = (AUDIO, "audio/wav")
+    fake_network(monkeypatch, pages)
+    code, _, err = run(capsys, "transcribe", f"https://open.spotify.com/episode/{EP}", "-q")
+    assert code == 0 and "warning: weak match" in err
+    # a fully confirmed match is not
+    fake_network(monkeypatch, {**spotify_pages(), "https://cdn.example.com/12.mp3": (AUDIO, "audio/wav")})
+    code, _, err = run(capsys, "transcribe", f"https://open.spotify.com/episode/{EP}", "-q")
+    assert code == 0 and "warning" not in err
