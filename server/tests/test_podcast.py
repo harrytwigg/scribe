@@ -129,17 +129,75 @@ def test_spotify_page_tags_are_the_fallback_when_the_embed_changes():
     assert podcast.resolve(FakeFetcher(pages), f"https://open.spotify.com/episode/{EP}").audio_url.endswith("/12.mp3")
 
 
-def test_matching_scores():
-    ep = lambda title, date, dur: podcast.Episode(title, "u", published=podcast.parse_date(date), duration_s=dur)
-    want = podcast.Wanted("The Big Idea", "S", podcast.parse_date("2026-03-04T09:00:00Z"), 2400)
-    assert podcast.best_match(want, [ep("Ep 12: The Big Idea", "Wed, 04 Mar 2026 08:00:00 GMT", 2410)])[0]
-    # Same title in a different year and at a different length is another episode (a repeat is not it)
-    assert podcast.best_match(want, [ep("Big Ideas", "Wed, 04 Mar 2020 08:00:00 GMT", 900)])[0] is None
-    # An exact title is enough when the feed lacks a date and duration
-    assert podcast.best_match(want, [ep("The Big Idea", None, None)])[0]
-    # A near title with a matching date and length (a rewording) passes; with neither, it does not
-    assert podcast.best_match(want, [ep("The Big Idea (rerun)!", "Wed, 04 Mar 2026 08:00:00 GMT", 2395)])[0]
-    assert podcast.best_match(podcast.Wanted("Crime Scene Mars", "S"), [ep("Cooking pasta", None, None)])[0] is None
+def ep(title, date=None, dur=None):
+    return podcast.Episode(title, "u", published=podcast.parse_date(date), duration_s=dur)
+
+
+WANT = podcast.Wanted("The Big Idea", "S", podcast.parse_date("2026-03-04T09:00:00Z"), 2400)
+
+
+def test_matching_accepts_the_same_episode_in_its_feed_form():
+    found, _ = podcast.best_match(WANT, [ep("Ep 12: The Big Idea", "Wed, 04 Mar 2026 08:00:00 GMT", 2410)])
+    assert found and found.match == {"title": 0.92, "overall": found.match["overall"], "date": True, "duration": True}
+    # An exact title is enough when the feed has no date or length
+    assert podcast.best_match(WANT, [ep("The Big Idea")])[0]
+    # A reworded title passes when the date and length back it up, and not without them
+    assert podcast.best_match(WANT, [ep("The Big Idea (rerun)!", "Wed, 04 Mar 2026 08:00:00 GMT", 2395)])[0]
+    assert podcast.best_match(WANT, [ep("The Big Idea (rerun)!")])[0] is None
+    assert podcast.best_match(podcast.Wanted("Crime Scene Mars", "S"), [ep("Cooking pasta")])[0] is None
+
+
+def test_an_identical_title_is_not_the_episode_when_the_date_and_length_disagree():
+    # A recurring title whose real episode is missing from a trimmed feed: another week's is not it.
+    want = podcast.Wanted("Weekly Roundup", "S", podcast.parse_date("2023-01-05T00:00:00Z"), 3000)
+    other_week = ep("Weekly Roundup", "Sat, 01 Mar 2025 00:00:00 GMT", 1500)
+    assert podcast.best_match(want, [other_week])[0] is None
+    # ... but one signal agreeing outweighs the other disagreeing (Spotify and the feed insert different ads)
+    assert podcast.best_match(want, [ep("Weekly Roundup", "Thu, 05 Jan 2023 00:00:00 GMT", 1500)])[0]
+    assert podcast.best_match(want, [ep("Weekly Roundup", "Sat, 01 Mar 2025 00:00:00 GMT", 3010)])[0]
+    # A date that disagrees when the feed gives no length also fails the match
+    assert podcast.best_match(want, [ep("Weekly Roundup", "Sat, 01 Mar 2025 00:00:00 GMT")])[0] is None
+
+
+def test_siblings_that_differ_by_a_number_are_not_the_episode():
+    part1 = podcast.Wanted("Interview with Jane Doe (Part 1)", "S", podcast.parse_date("2023-01-05T00:00:00Z"), 3000)
+    assert podcast.best_match(part1, [ep("Interview with Jane Doe (Part 2)")])[0] is None
+    assert podcast.best_match(podcast.Wanted("Episode 12", "S"), [ep("Episode 13")])[0] is None
+    assert podcast.best_match(podcast.Wanted("#1234 Some Guest", "S"), [ep("#1235 Some Guest")])[0] is None
+    # with the date or length agreeing, the number difference is the feed's own numbering
+    assert podcast.best_match(part1, [ep("Interview with Jane Doe (Part 2)", "Thu, 05 Jan 2023 00:00:00 GMT")])[0]
+    # and the right part wins when both are there
+    right, _ = podcast.best_match(part1, [ep("Interview with Jane Doe (Part 2)"), ep("Interview with Jane Doe (Part 1)")])
+    assert right.title.endswith("(Part 1)")
+    # a feed's "Ep 12:" prefix is a number on one side only, not a mismatch: the date confirms it,
+    # but with no date or length to go on a title that is merely contained is too weak
+    assert podcast.best_match(podcast.Wanted("The Big Idea", "S"), [ep("Ep 12: The Big Idea")])[0] is None
+    assert podcast.best_match(WANT, [ep("Ep 12: The Big Idea", "Wed, 04 Mar 2026 08:00:00 GMT")])[0]
+
+
+def test_spotify_short_links_follow_the_redirect():
+    final = f"https://open.spotify.com/episode/{EP}?si=abc"
+    pages = {**spotify_pages(), "https://spotify.link/AbCd123": (b"", "text/html", final)}
+    assert podcast.resolve(FakeFetcher(pages), "https://spotify.link/AbCd123").audio_url.endswith("/12.mp3")
+
+
+def test_a_spotify_page_that_does_not_exist_is_not_found_not_a_network_error():
+    with pytest.raises(NotFound, match="no public episode"):
+        podcast.resolve(FakeFetcher({}), f"https://open.spotify.com/episode/{EP}")
+
+
+def test_redirects_to_private_or_non_http_targets_are_refused():
+    import urllib.request
+
+    request = urllib.request.Request("https://cdn.example.com/a.mp3")
+    for public_only in (True, False):
+        handler = podcast._Redirects(public_only)
+        for target in ("file:///etc/passwd", "ftp://example.com/a", "gopher://example.com/"):
+            with pytest.raises(Unsupported):
+                handler.redirect_request(request, None, 302, "Found", {}, target)
+    for target in ("http://127.0.0.1:8787/api/status", "//127.0.0.1/x", "http://[::1]/", "http://169.254.169.254/latest"):
+        with pytest.raises(Unsupported, match="public address"):
+            podcast._Redirects(True).redirect_request(request, None, 302, "Found", {}, target)
 
 
 def test_durations_and_dates():

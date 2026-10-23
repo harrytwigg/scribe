@@ -48,7 +48,11 @@ class NotFound(PodcastError):
 
 
 class FetchError(PodcastError):
-    """The network or a remote server failed."""
+    """The network or a remote server failed. `status` is the HTTP status when a server answered."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 # -- fetching -----------------------------------------------------------------------------------
@@ -128,7 +132,7 @@ class Fetcher:
         try:
             response = self._opener.open(request, timeout=self.timeout)
         except urllib.error.HTTPError as error:
-            raise FetchError(f"{url} answered HTTP {error.code} {error.reason}") from error
+            raise FetchError(f"{url} answered HTTP {error.code} {error.reason}", error.code) from error
         except (urllib.error.URLError, OSError, ValueError) as error:
             raise FetchError(f"cannot reach {url}: {getattr(error, 'reason', error)}") from error
         return Reply(response, response.geturl())
@@ -166,6 +170,9 @@ class Episode:
     feed_url: str | None = None
     source: str = "url"  # spotify, apple, rss, url
     source_url: str | None = None
+    # How sure the match is, for a Spotify link: `title` (0 to 1), `overall`, and whether the
+    # `date` and `duration` agreed (None: the feed did not say). A weak match is worth a look.
+    match: dict | None = None
 
     def to_json(self) -> dict:
         data = asdict(self)
@@ -233,33 +240,74 @@ def parse_date(text: str | None) -> datetime | None:
     return date if date.tzinfo else date.replace(tzinfo=timezone.utc)
 
 
-def score(want: Wanted, have: Episode) -> tuple[float, float]:
-    """(overall, title) similarity of a feed's episode to what the link said, 0 to 1. The title
-    counts most; the date (within a day or two: time zones, late uploads) and the duration (within
-    a few percent: Spotify and the feed insert different ads) confirm it."""
+def numbers(text: str) -> list[str]:
+    return re.findall(r"\d+", normalise(text))
+
+
+@dataclass
+class Match:
+    title: float
+    overall: float
+    date: bool | None  # agreed within a day or two; None: one side has no date
+    duration: bool | None  # agreed within a few percent; None: one side has no length
+    numerals_differ: bool
+
+    @property
+    def agreed(self) -> bool:
+        return self.date is True or self.duration is True
+
+    @property
+    def contradicted(self) -> bool:
+        return self.date is False and self.duration is not True or self.duration is False and self.date is not True
+
+    def accepted(self) -> bool:
+        """Is this the wanted episode? An identical title is not enough alone: sibling episodes
+        share titles ("Weekly Roundup"), differ only in a number ("Part 1", "Episode 12"), or
+        a repeat of the title may be another year's. So a date or length that both sides give must
+        not disagree, a title that differs in a number needs the date or length to agree, and
+        a title that is not identical needs something besides the title to agree."""
+        if self.contradicted or (self.numerals_differ and not self.agreed):
+            return False
+        if self.title >= 0.97:
+            return True
+        return self.agreed and self.overall >= 0.8 and self.title >= 0.6
+
+    def to_json(self) -> dict:
+        return {"title": round(self.title, 3), "overall": round(self.overall, 3), "date": self.date, "duration": self.duration}
+
+
+def score(want: Wanted, have: Episode) -> Match:
+    """How well a feed's episode matches what the link said. The title counts most; the date (within
+    a day or two: time zones, late uploads) and the duration (within a few percent: Spotify and the
+    feed insert different ads) confirm or contradict it."""
     title = similar(want.title, have.title)
     signals = [(0.6, title)]
+    date = duration = None
     if want.published and have.published:
         days = abs((want.published - have.published).total_seconds()) / 86400
         signals.append((0.2, 1.0 if days <= 1.6 else 0.5 if days <= 3.5 else 0.0))
+        date = days <= 1.6 if days <= 1.6 or days > 3.5 else None  # in between: neither
     if want.duration_s and have.duration_s:
         gap = abs(want.duration_s - have.duration_s)
         relative = gap / max(want.duration_s, have.duration_s)
         signals.append((0.2, 1.0 if gap <= 60 or relative <= 0.03 else 0.5 if relative <= 0.1 else 0.0))
-    return sum(w * v for w, v in signals) / sum(w for w, _ in signals), title
+        duration = True if gap <= 60 or relative <= 0.03 else None if relative <= 0.1 else False
+    # Both titles carry numbers and they are not the same numbers ("Part 1" / "Part 2"). A number
+    # on only one side is a feed's "Ep 12:" prefix.
+    a, b = numbers(want.title), numbers(have.title)
+    return Match(
+        title, sum(w * v for w, v in signals) / sum(w for w, _ in signals), date, duration, bool(a and b and a != b)
+    )
 
 
 def best_match(want: Wanted, episodes: list[Episode]) -> tuple[Episode | None, list[tuple[float, Episode]]]:
-    """The feed's episode that is the wanted one, or None; with the ranked candidates."""
-    ranked = sorted(((score(want, e), e) for e in episodes), key=lambda pair: pair[0], reverse=True)
-    top = [(s[0], e) for s, e in ranked[:3]]
-    if not ranked:
-        return None, top
-    (overall, title), episode = ranked[0]
-    # An (almost) identical title is identifying even when the date or length differs;
-    # otherwise the title has to be close and the other signals have to back it up.
-    if title >= 0.97 or (overall >= 0.8 and title >= 0.6):
-        return episode, top
+    """The feed's episode that is the wanted one, or None; with the top candidates by score."""
+    ranked = sorted(((score(want, e), e) for e in episodes), key=lambda pair: pair[0].overall, reverse=True)
+    top = [(m.overall, e) for m, e in ranked[:3]]
+    for match, episode in sorted(ranked, key=lambda pair: (pair[0].accepted(), pair[0].overall), reverse=True)[:1]:
+        if match.accepted():
+            episode.match = match.to_json()
+            return episode, top
     return None, top
 
 
@@ -380,7 +428,12 @@ def _meta(page: str, key: str) -> str | None:
 def spotify_meta(fetcher: Fetcher, kind: str, spotify_id: str) -> Wanted:
     """An episode's title, show, release date and length from Spotify's public pages. For a show,
     its latest episode (Spotify's embed shows that), which also names the show."""
-    embed = fetcher.get(f"https://open.spotify.com/embed/{kind}/{spotify_id}")[0].decode("utf-8", "replace")
+    try:
+        embed = fetcher.get(f"https://open.spotify.com/embed/{kind}/{spotify_id}")[0].decode("utf-8", "replace")
+    except FetchError as error:
+        if error.status in (400, 404):
+            raise NotFound(f"Spotify has no public {kind} with id {spotify_id}") from error
+        raise
     data = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', embed, re.S)
     if data:
         try:
@@ -412,8 +465,9 @@ def spotify_meta(fetcher: Fetcher, kind: str, spotify_id: str) -> Wanted:
 
 EXCLUSIVE = (
     "Spotify's own audio is DRM-protected and cannot be downloaded; scribe fetches the public copy from the "
-    "show's RSS feed, and {what}. A Spotify exclusive has no public feed, so it cannot be transcribed from "
-    "the link. Pass the RSS or mp3 URL, or an audio file, if you have one."
+    "show's RSS feed, and {what}. A Spotify exclusive has no public feed (and a feed may have dropped an "
+    "old episode), so it cannot be transcribed from the link. Pass the RSS or mp3 URL, or an audio file, if "
+    "you have one."
 )
 
 
@@ -422,7 +476,7 @@ def resolve_spotify(fetcher: Fetcher, kind: str, spotify_id: str, nth: int = 1) 
     if not want.show:
         raise FetchError(f"Spotify did not name the show of {kind} {spotify_id}")
     found: list[tuple[float, Episode, list[Episode]]] = []
-    tried = []
+    tried, closest = [], []
     for entry in itunes_feeds(fetcher, want.show)[:6]:
         if entry["name_score"] < 0.8:
             continue
@@ -431,9 +485,11 @@ def resolve_spotify(fetcher: Fetcher, kind: str, spotify_id: str, nth: int = 1) 
             _, episodes = load_feed(fetcher, entry["feed"])
         except PodcastError:
             continue
-        match, _ = best_match(want, episodes)
+        match, top = best_match(want, episodes)
+        if not match and top:
+            closest.append(f"{top[0][1].title!r} ({top[0][1].published.date() if top[0][1].published else 'undated'})")
         if match:
-            found.append((score(want, match)[0] + entry["name_score"] / 10, match, episodes))
+            found.append((match.match["overall"] + entry["name_score"] / 10, match, episodes))
         elif kind == "show" and entry["name_score"] >= 0.95 and episodes:
             # A show link names the show, not an episode we must find: a feed with its name will do.
             found.append((entry["name_score"] / 10, episodes[0], episodes))
@@ -448,7 +504,8 @@ def resolve_spotify(fetcher: Fetcher, kind: str, spotify_id: str, nth: int = 1) 
             if tried else f"no public feed was found for a show called {want.show!r}"
         )
         if tried:
-            what += f" (looked in: {'; '.join(tried)})"
+            what += f" (looked in: {'; '.join(tried)}"
+            what += f"; closest titles there: {'; '.join(closest)})" if closest else ")"
         raise NotFound(EXCLUSIVE.format(what=what))
     _, match, episodes = max(found, key=lambda f: f[0])
     chosen = match if kind == "episode" else pick_nth(episodes, nth)

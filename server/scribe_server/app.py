@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import shutil
 import tempfile
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -44,6 +46,8 @@ class Services:
     max_upload_bytes: int = 512 * 1024 * 1024
     # Fetches a pasted podcast link for the GUI; None makes one that refuses non-public addresses.
     fetcher: podcast.Fetcher | None = None
+    # Transcriptions running at once (each holds a decoded recording in memory); more wait at the client.
+    max_jobs: int = 2
     # Holds the number of open sessions, for the host's idle check to read without a token.
     open_sessions_file: Path | None = None
     # A browser session with no line or heartbeat for this long is ended: the browser quit or
@@ -81,6 +85,8 @@ class Job:
     created: float = field(default_factory=time.time)
     finished: float | None = None
     task: asyncio.Task | None = None
+    work: Path | None = None  # holds the audio file until it is decoded
+    cancel: threading.Event = field(default_factory=threading.Event)  # for the thread that fetches
 
     @property
     def active(self) -> bool:
@@ -262,7 +268,7 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
         return await file.read()
 
-    async def decode_upload(data: bytes, model: str | None = None) -> np.ndarray:
+    async def decode_upload(data: bytes | Path, model: str | None = None) -> np.ndarray:
         if model and model != s.models.active_id:
             raise HTTPException(
                 409, f"model {model!r} is not active; the active model is {s.models.active_id!r} (pick one in the GUI)"
@@ -372,6 +378,7 @@ def create_app(services: Services) -> FastAPI:
             "queue_depth": s.worker.depth,
             "open_sessions": s.store.count_open_sessions(),
             "diarization": s.diarization.status,
+            "transcriptions": {"running": sum(job.active for job in jobs.values()), "max": s.max_jobs},
         }
 
     @app.get("/api/models", dependencies=[Depends(guard)])
@@ -470,16 +477,33 @@ def create_app(services: Services) -> FastAPI:
     JOB_KEEP_S = 3600
     VAD_WINDOW_S = 600  # speech detection runs over this much audio per GPU-queue turn
 
-    def new_job(title: str) -> Job:
+    def prune_jobs() -> None:
         now = time.time()
         for old in [j for j in jobs.values() if not j.active and now - (j.finished or now) > JOB_KEEP_S]:
             jobs.pop(old.id, None)
+
+    def new_job(title: str) -> Job:
+        """A job slot, or 429 when `max_jobs` are already running (the client retries)."""
+        prune_jobs()
+        if sum(job.active for job in jobs.values()) >= s.max_jobs:
+            raise HTTPException(
+                429, f"{s.max_jobs} transcriptions are already running; try again when one finishes",
+                headers={"Retry-After": "30"},
+            )
         job = Job(id=uuid.uuid4().hex[:12], title=one_line(title)[:120] or "Recording")
+        job.work = Path(tempfile.mkdtemp(prefix="scribe-job-"))
         jobs[job.id] = job
         write_open_sessions()
         return job
 
+    def discard_job(job: Job) -> None:
+        """Forget a job that never started (its request was refused)."""
+        jobs.pop(job.id, None)
+        shutil.rmtree(job.work, ignore_errors=True)
+        write_open_sessions()
+
     def job_or_404(job_id: str) -> Job:
+        prune_jobs()
         if job_id not in jobs:
             raise HTTPException(404, "no such transcription (finished ones are forgotten after an hour)")
         return jobs[job_id]
@@ -539,13 +563,13 @@ def create_app(services: Services) -> FastAPI:
         return session["id"]
 
     async def run_job(job: Job, source, diarize: bool) -> None:
-        """`source` is an awaitable giving the audio bytes (it may fetch them first)."""
+        """`source` is an awaitable giving the path of the audio file in `job.work` (it may fetch it first)."""
         try:
             job.status = "fetching"
-            data = await source(job)
+            path = await source(job)
             job.status = "decoding"
-            audio = await decode_upload(data)
-            del data
+            audio = await decode_upload(path)
+            shutil.rmtree(job.work, ignore_errors=True)  # no audio is kept
             job.status = "transcribing"
             diarizer = s.diarization.ready() if diarize else None
             for attempt in range(60):  # a full queue is not the job's failure: wait for room
@@ -572,6 +596,7 @@ def create_app(services: Services) -> FastAPI:
             log.exception("transcription %s failed", job.id)
             job.status, job.error = "error", f"transcription failed: {error}"
         finally:
+            shutil.rmtree(job.work, ignore_errors=True)
             job.finished = time.time()
             job.task = None
             write_open_sessions()
@@ -592,20 +617,26 @@ def create_app(services: Services) -> FastAPI:
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > s.max_upload_bytes:
             raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
-        body = bytearray()
-        async for part in request.stream():
-            body += part
-            if len(body) > s.max_upload_bytes:
-                raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
-        if not body:
-            raise HTTPException(400, "the request body is empty: send the audio file as the body")
-        held = [bytes(body)]
-        del body
+        job = new_job(title or Path(filename).stem or "Recording")
+        path = job.work / "upload"
+        try:
+            size = 0
+            with path.open("wb") as out:  # to disk: the audio is only held decoded, once
+                async for part in request.stream():
+                    size += len(part)
+                    if size > s.max_upload_bytes:
+                        raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
+                    out.write(part)
+            if not size:
+                raise HTTPException(400, "the request body is empty: send the audio file as the body")
+        except BaseException:
+            discard_job(job)
+            raise
 
-        async def source(_: Job) -> bytes:
-            return held.pop()  # the job keeps no other reference, so the bytes go once decoded
+        async def source(_: Job) -> Path:
+            return path
 
-        return start_job(new_job(title or Path(filename).stem or "Recording"), source, diarize)
+        return start_job(job, source, diarize)
 
     class LinkJob(BaseModel):
         url: str
@@ -620,16 +651,19 @@ def create_app(services: Services) -> FastAPI:
         fetcher = s.fetcher or podcast.Fetcher(public_only=True)
         job = new_job("Podcast")
 
-        async def source(job: Job) -> bytes:
-            def fetch() -> tuple[podcast.Episode, bytes]:
+        async def source(job: Job) -> Path:
+            def aborted(*_) -> None:
+                if job.cancel.is_set():  # called as the download streams: stops it
+                    raise podcast.PodcastError("cancelled")
+
+            def fetch() -> Path:
                 episode = podcast.resolve(fetcher, body.url.strip(), body.episode)
+                aborted()
                 job.episode = episode.to_json()
                 job.title = one_line(f"{episode.show}: {episode.title}" if episode.show else episode.title)[:120]
-                with tempfile.TemporaryDirectory(prefix="scribe-dl-") as directory:
-                    path = podcast.download(fetcher, episode.audio_url, Path(directory), "episode", limit=s.max_upload_bytes)
-                    return episode, path.read_bytes()
+                return podcast.download(fetcher, episode.audio_url, job.work, "episode", aborted, limit=s.max_upload_bytes)
 
-            return (await asyncio.to_thread(fetch))[1]
+            return await asyncio.to_thread(fetch)
 
         return start_job(job, source, body.diarize)
 
@@ -638,10 +672,15 @@ def create_app(services: Services) -> FastAPI:
         return job_or_404(job_id).public()
 
     @app.delete("/api/transcriptions/{job_id}", dependencies=[Depends(guard)])
-    def cancel_job(job_id: str) -> dict:
+    async def cancel_job(job_id: str) -> dict:  # async: runs on the event loop with the jobs it stops
         job = job_or_404(job_id)
-        if job.active and job.task:
-            job.task.cancel()
+        if job.active:
+            job.cancel.set()  # the fetching thread notices at its next chunk
+            if job.task:
+                job.task.cancel()
+            job.status, job.error, job.finished = "cancelled", "cancelled", time.time()
+            shutil.rmtree(job.work, ignore_errors=True)
+            write_open_sessions()
         return {"ok": True}
 
     # -- sessions -------------------------------------------------------------------------------

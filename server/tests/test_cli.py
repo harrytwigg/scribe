@@ -1,9 +1,11 @@
 """The `scribe` command against a real HTTP server (the fake-engine harness behind uvicorn)."""
 
 import json
+import os
 import socket
 import threading
 import time
+import types
 import urllib.parse
 
 import numpy as np
@@ -141,9 +143,11 @@ def test_errors_have_distinct_exit_codes(served, tmp_path, monkeypatch, capsys):
     bad.write_bytes(b"not audio")
     code, _, err = run(capsys, "transcribe", str(bad), "-q")
     assert code == 6 and "cannot decode" in err
+    good_url = os.environ["SCRIBE_URL"]
     monkeypatch.setenv("SCRIBE_URL", "http://127.0.0.1:1")
     code, _, err = run(capsys, "status")
     assert code == 5 and "cannot reach the scribe server" in err
+    monkeypatch.setenv("SCRIBE_URL", good_url)
     fake_network(monkeypatch, {})
     assert run(capsys, "transcribe", "https://example.com/dead.mp3", "-q")[0] == 4
 
@@ -161,3 +165,32 @@ def test_settings_come_from_the_env_file_then_the_secrets_file(tmp_path, monkeyp
     assert cli.server_url("http://flag:1/") == "http://flag:1"
     monkeypatch.setenv("SCRIBE_API_TOKEN", "from-env")
     assert cli.api_token(None) == "from-env" and cli.api_token("flag") == "flag"
+
+
+def test_a_wrong_token_is_reported_before_a_large_upload(served, tmp_path, monkeypatch, capsys):
+    big = tmp_path / "big.wav"
+    big.write_bytes(wav(tone(3)) + b"\0" * (30 * 1024 * 1024))  # the server would reset the connection mid-send
+    monkeypatch.setenv("SCRIBE_API_TOKEN", "wrong")
+    code, _, err = run(capsys, "transcribe", str(big), "-q")
+    assert code == 5 and "rejected the token" in err and "cannot reach" not in err
+
+
+def test_a_busy_server_makes_the_cli_wait_and_retry(served, tmp_path, monkeypatch, capsys):
+    served.services.max_jobs = 1
+    served.loader.engines["alpha"].delay = 0.2
+    real_sleep = time.sleep
+    monkeypatch.setattr(cli, "time", types.SimpleNamespace(sleep=lambda s: real_sleep(0.05), monotonic=time.monotonic))  # not 15 s
+    path = tmp_path / "talk.wav"
+    path.write_bytes(AUDIO)
+    first = cli.Server(served.url, "test-token").call("POST", "/api/transcriptions", body=AUDIO)  # takes the only slot
+    code, out, err = run(capsys, "transcribe", str(path))
+    assert code == 0 and "waiting" in err and out.count("alpha:") == 2
+    assert first["id"]
+
+
+def test_no_active_model_is_reported_up_front(served, tmp_path, monkeypatch, capsys):
+    served.models._active = None  # as before a model was ever picked
+    path = tmp_path / "talk.wav"
+    path.write_bytes(AUDIO)
+    code, _, err = run(capsys, "transcribe", str(path), "-q")
+    assert code == 5 and "no active model" in err

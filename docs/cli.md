@@ -40,7 +40,9 @@ Spotify's own audio is DRM-protected and not downloadable. scribe does what podc
 instead: it reads the episode's title, show, release date and length from Spotify's public pages,
 finds the show's public RSS feed through Apple's podcast directory, matches the episode in the
 feed (title first; date within a couple of days and length within a few percent confirm it), and
-downloads the feed's `<enclosure>` audio. This is the same recording most listeners hear, though
+downloads the feed's `<enclosure>` audio. It refuses rather than guess: an episode whose title is the
+same but whose date and length both disagree (another week's "Weekly Roundup"), or that differs only
+in a number ("Part 1" / "Part 2", "Episode 12" / "13"), is not accepted unless the date or length agrees. This is the same recording most listeners hear, though
 Spotify and the feed may insert different ads.
 
 A **Spotify exclusive** (or any show not in Apple's directory with a public feed) has no public
@@ -70,7 +72,8 @@ Spotify pages likewise fail.
   "source": "https://open.spotify.com/episode/3tdrNundncNjVFHyNy9zXM",
   "episode": {"title": "...", "show": "Up First from NPR", "publisher": "NPR", "published": "2026-10-22T10:08:23+00:00",
               "duration_s": 746.0, "audio_url": "https://...mp3", "feed_url": "https://feeds.npr.org/510318/podcast.xml",
-              "source": "spotify", "source_url": "https://open.spotify.com/episode/..."},
+              "source": "spotify", "source_url": "https://open.spotify.com/episode/...",
+              "match": {"title": 1.0, "overall": 1.0, "date": true, "duration": true}},
   "model": "parakeet-tdt-0.6b-v2", "duration_s": 874.9, "asr_ms": 11367, "speakers": 1,
   "text": "full transcript ...",
   "segments": [{"speaker": "Speaker 1", "start": 0.15, "end": 22.54, "text": "..."}],
@@ -78,7 +81,10 @@ Spotify pages likewise fail.
 }
 ```
 
-`episode` is `null` for a local file. `segments` are stretches of speech (up to 25 s each, or whole
+`episode` is `null` for a local file. For a Spotify link, `episode.match` says how sure the match is:
+`title` and `overall` are 0 to 1, `date` and `duration` say whether Spotify's and the feed's agreed
+(`null`: the feed did not say). An identical title alone is accepted only when nothing contradicts it;
+treat `date` and `duration` both `null` or a `title` below 1 as a weaker match worth a glance. `segments` are stretches of speech (up to 25 s each, or whole
 turns with `--speakers`) with start and end in seconds. `session_id` is the History entry
 (`null` with `--no-save`).
 
@@ -108,8 +114,9 @@ the message is on stderr either way).
 
 ## Limits and behaviour worth knowing
 
-- Audio is uploaded to the server (one request, up to 512 MB) and transcribed as a background job;
-  the CLI polls it. A 15-minute episode takes about 15 s with Parakeet on the GPU. A long episode
+- Audio is uploaded to the server (one request, up to 512 MB; streamed to a temporary file there and
+  deleted once decoded) and transcribed as a background job; the CLI polls it. The server runs at most
+  2 transcriptions at once; `scribe` waits and retries while it is busy. A 15-minute episode takes about 15 s with Parakeet on the GPU. A long episode
   yields to live calls: its speech is transcribed chunk by chunk through the same queue.
 - `--speakers` on a long recording holds the GPU for that recording's whole transcription in one
   piece (a live call waits for it); prefer it for recordings of an hour or less.

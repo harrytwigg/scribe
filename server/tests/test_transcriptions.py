@@ -1,6 +1,7 @@
 """The background transcription API: an uploaded recording or a pasted podcast link becomes a job,
 and a finished job becomes a session in History."""
 
+import tempfile
 import time
 
 import numpy as np
@@ -8,7 +9,7 @@ import numpy as np
 from scribe_server.diarize import DiarizerSlot
 
 from .conftest import Harness, silence, tone, wav
-from .podcast_fakes import FakeFetcher, feed
+from .podcast_fakes import FakeFetcher, FakeReply, feed
 from .test_diarize import FakeDiarizer, pitch
 
 
@@ -165,3 +166,57 @@ def test_a_busy_queue_makes_a_job_wait_not_fail(tmp_path):
             assert job["status"] == "done" and len(job["result"]["segments"]) == 12
     finally:
         h.worker.stop()
+
+
+def test_only_max_jobs_run_at_once_and_a_refused_upload_leaves_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    h = Harness(tmp_path / "h")
+    h.services.max_jobs = 1
+    h.services.open_sessions_file = tmp_path / "open"
+    h.ready("alpha")
+    h.loader.engines["alpha"].delay = 0.3
+    try:
+        with h.client as c:
+            first = upload(c).json()["id"]
+            busy = upload(c)
+            assert busy.status_code == 429 and busy.headers["Retry-After"] == "30"
+            assert c.post("/api/transcriptions/link", json={"url": "https://x.test/a.mp3"}).status_code == 429
+            assert (tmp_path / "open").read_text().strip() == "1"
+            # a body over the limit, streamed without a length, is refused and frees its slot
+            assert wait(c, first)["status"] == "done"
+            h.services.max_upload_bytes = 100
+            assert c.post("/api/transcriptions", content=iter([b"x" * 60, b"x" * 60])).status_code == 413
+            assert (tmp_path / "open").read_text().strip() == "0"
+            h.services.max_upload_bytes = 512 * 1024 * 1024
+            assert wait(c, upload(c).json()["id"])["status"] == "done"
+        assert list(tmp_path.glob("scribe-job-*")) == [], "the audio is not kept"
+    finally:
+        h.worker.stop()
+
+
+def test_cancelling_a_fetch_stops_the_download(harness):
+    harness.ready("alpha")
+    reads = []
+
+    class SlowReply(FakeReply):
+        def read(self, n=-1):
+            time.sleep(0.02)
+            reads.append(1)
+            return super().read(min(n, 1000) if n > 0 else n)
+
+    class SlowFetcher(FakeFetcher):
+        def request(self, url, headers=None):
+            body, content_type, *_ = self.pages[url]
+            return SlowReply(url, body, content_type)
+
+    harness.services.fetcher = SlowFetcher({"https://cdn.example.com/long.mp3": (b"x" * 200_000, "audio/mpeg")})
+    with harness.client as c:
+        job_id = c.post("/api/transcriptions/link", json={"url": "https://cdn.example.com/long.mp3"}).json()["id"]
+        time.sleep(0.3)
+        assert c.delete(f"/api/transcriptions/{job_id}").status_code == 200
+        assert c.get(f"/api/transcriptions/{job_id}").json()["status"] == "cancelled"  # at once, not eventually
+        time.sleep(0.2)
+        settled = len(reads)
+        time.sleep(0.5)
+        assert len(reads) == settled and settled < 100, "the download thread must stop, not run on to the end"
+        assert c.get("/api/sessions").json() == []

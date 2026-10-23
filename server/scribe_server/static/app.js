@@ -438,20 +438,25 @@ function txStatus(text, progress = null) {
   if (progress != null) bar.value = progress;
 }
 
-function txFail(message) {
+function txFail(message, quiet = false) {
   txBusy(false);
   $('#tx-status').textContent = message;
-  $('#tx-status').className = 'error';
+  $('#tx-status').className = quiet ? 'hint' : 'error';
 }
 
 /** POST the file itself as the body, with upload progress (fetch cannot report it). */
+let uploading = null; // the upload in flight, for Cancel
+
 function uploadFile(file, params, onProgress) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
+    uploading = request;
+    request.onabort = () => reject(Object.assign(new Error('Cancelled.'), { cancelled: true }));
     request.open('POST', `/api/transcriptions?${new URLSearchParams(params)}`);
     request.upload.onprogress = (event) => event.lengthComputable && onProgress(event.loaded / event.total);
     request.onerror = () => reject(new Error('The upload failed: the server could not be reached.'));
     request.onload = () => {
+      uploading = null;
       if (request.status === 401) { showLogin(); reject(new Unauthorised()); return; }
       let body = {};
       try { body = JSON.parse(request.responseText); } catch {}
@@ -492,7 +497,8 @@ function follow(id) {
     stopFollowing();
     remembered.set(null);
     if (job.status === 'done') { txBusy(false); txStatus(''); await showTranscript(job); }
-    else txFail(job.status === 'cancelled' ? 'Cancelled.' : job.error ?? 'The transcription failed.');
+    else if (job.status === 'cancelled') txFail('Cancelled.', true);
+    else txFail(job.error ?? 'The transcription failed.');
   };
   txJob = { id, timer: setInterval(tick, 1500) };
   tick();
@@ -546,10 +552,12 @@ $('#tx-form').addEventListener('submit', async (event) => {
       });
     }
     follow(job.id);
-  } catch (error) { if (!(error instanceof Unauthorised)) txFail(error.message); }
+  } catch (error) { if (!(error instanceof Unauthorised)) txFail(error.message, error.cancelled); }
+  finally { uploading = null; }
 });
 
 $('#tx-cancel').addEventListener('click', async () => {
+  if (uploading) { uploading.abort(); return; } // still sending the file
   if (!txJob) return;
   try { await api(`/api/transcriptions/${txJob.id}`, { method: 'DELETE' }); } catch {}
 });

@@ -37,7 +37,7 @@ class FakeFetcher(Fetcher):
     def request(self, url, headers=None):
         self.requested.append(url)
         if url not in self.pages:
-            raise FetchError(f"{url} answered HTTP 404 Not Found")
+            raise FetchError(f"{url} answered HTTP 404 Not Found", 404)
         body, content_type, *final = self.pages[url]
         return FakeReply(url, body, content_type, final[0] if final else None)
 

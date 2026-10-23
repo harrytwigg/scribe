@@ -2,6 +2,7 @@
 
 import io
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import soundfile
@@ -18,33 +19,49 @@ class AudioError(ValueError):
     pass
 
 
-def decode(data: bytes) -> np.ndarray:
+def decode(source: bytes | Path) -> np.ndarray:
     """Any format libsndfile reads (WAV, FLAC, OGG/Opus, MP3) to 16 kHz mono float32, and
-    otherwise (M4A/AAC, video containers: many podcast feeds) anything FFmpeg reads, via PyAV."""
+    otherwise (M4A/AAC, video containers: many podcast feeds) anything FFmpeg reads, via PyAV.
+    A path is read in blocks, so a long recording at a high rate and several channels never sits
+    in memory at its source size."""
     try:
-        audio, rate = soundfile.read(io.BytesIO(data), dtype="float32", always_2d=True)
+        return _decode_sndfile(source)
     except Exception as error:  # soundfile raises a bare LibsndfileError/RuntimeError
-        return _decode_av(data, error)
-    mono = audio.mean(axis=1)
-    if rate != RATE:
-        mono = soxr.resample(mono, rate, RATE)
-    return np.ascontiguousarray(mono, dtype=np.float32)
+        return _decode_av(source, error)
 
 
-def _decode_av(data: bytes, first_error: Exception) -> np.ndarray:
+def _decode_sndfile(source: bytes | Path) -> np.ndarray:
+    opened = soundfile.SoundFile(io.BytesIO(source) if isinstance(source, bytes) else str(source))
+    with opened as audio:
+        rate = audio.samplerate
+        resampler = soxr.ResampleStream(rate, RATE, 1, dtype="float32") if rate != RATE else None
+        parts = [
+            (resampler.resample_chunk(mono) if resampler else mono)
+            for mono in (block.mean(axis=1) for block in audio.blocks(blocksize=rate * 30, dtype="float32", always_2d=True))
+        ]
+        if resampler:
+            parts.append(resampler.resample_chunk(np.zeros(0, dtype=np.float32), last=True))
+    if not parts:
+        raise AudioError("cannot decode audio: it has no samples")
+    return np.ascontiguousarray(np.concatenate(parts), dtype=np.float32)
+
+
+def _decode_av(source: bytes | Path, first_error: Exception) -> np.ndarray:
     import av  # faster-whisper's dependency; imported here, it is slow to load
 
     try:
-        with av.open(io.BytesIO(data)) as container:
+        with av.open(io.BytesIO(source) if isinstance(source, bytes) else str(source)) as container:
             if not container.streams.audio:
                 raise AudioError("cannot decode audio: no audio stream")
-            resampler = av.AudioResampler(format="flt", layout="mono", rate=RATE)
+            # Planar, the source's own channels: they are averaged below as in the main path
+            # (letting FFmpeg downmix would change the level).
+            resampler = av.AudioResampler(format="fltp", rate=RATE)
             parts = []
             for frame in container.decode(audio=0):
                 for out in resampler.resample(frame):
-                    parts.append(out.to_ndarray().reshape(-1))
+                    parts.append(out.to_ndarray().mean(axis=0))
             for out in resampler.resample(None):
-                parts.append(out.to_ndarray().reshape(-1))
+                parts.append(out.to_ndarray().mean(axis=0))
     except AudioError:
         raise
     except Exception as error:

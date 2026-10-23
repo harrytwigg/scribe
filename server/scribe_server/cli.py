@@ -57,9 +57,9 @@ Examples:
 
 
 class CliError(Exception):
-    def __init__(self, message: str, code: int, kind: str):
+    def __init__(self, message: str, code: int, kind: str, http_status: int | None = None, retry_after: float = 0):
         super().__init__(message)
-        self.code, self.kind = code, kind
+        self.code, self.kind, self.http_status, self.retry_after = code, kind, http_status, retry_after
 
 
 def say(message: str, quiet: bool = False) -> None:
@@ -127,8 +127,12 @@ class Server:
                     f"the scribe server at {self.url} rejected the token: set SCRIBE_API_TOKEN, pass --token, or "
                     f"point SCRIBE_SECRETS_FILE at a JSON file holding it", SERVER, "auth",
                 ) from error
-            code = SERVER if error.code in (503, 409, 413) else FAILED
-            raise CliError(f"the scribe server said {error.code}: {detail}", code, "server") from error
+            code = SERVER if error.code in (503, 409, 413, 429) else FAILED
+            retry = error.headers.get("Retry-After", "")
+            raise CliError(
+                f"the scribe server said {error.code}: {detail}", code, "server", error.code,
+                float(retry) if retry.isdigit() else 0,
+            ) from error
         except (urllib.error.URLError, OSError) as error:
             raise CliError(
                 f"cannot reach the scribe server at {self.url} ({getattr(error, 'reason', error)}); is it running "
@@ -180,14 +184,50 @@ def fetch_audio(episode: podcast.Episode, directory: Path, quiet: bool) -> Path:
 # -- talking to the server ---------------------------------------------------------------------
 
 
+def check_server(server: Server) -> None:
+    """Fail early and accurately: unreachable, wrong token, no model. (A server that refuses a
+    request closes the connection while a large upload is still being sent, which the client sees
+    only as a reset, so the token is checked before any audio is sent.)"""
+    status = server.call("GET", "/api/status")
+    if not status.get("active_model"):
+        raise CliError(f"the scribe server at {server.url} has no active model; pick one in its GUI", SERVER, "no_model")
+
+
+def start_job(server: Server, path: Path, query: str, quiet: bool) -> dict:
+    waited, dropped = 0.0, 0
+    while True:
+        busy = server.call("GET", "/api/status").get("transcriptions", {})
+        if busy.get("running", 0) >= busy.get("max", 1 << 30) and waited <= 3600:
+            say(f"the server is running {busy['running']} transcriptions already; waiting", quiet)
+            time.sleep(15)
+            waited += 15
+            continue
+        try:
+            with path.open("rb") as audio:
+                return server.call(
+                    "POST", f"/api/transcriptions?{query}", body=audio, timeout=3600,
+                    headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)},
+                )
+        except CliError as error:
+            retry = error.http_status == 429
+            if error.kind == "unreachable":
+                # A server that refuses a large upload (busy: 429) closes the connection while it
+                # is still being sent, which arrives here as a reset. Say why if the server
+                # answers now (wrong token, no model); otherwise it was busy: try again.
+                check_server(server)
+                dropped += 1
+                retry = dropped <= 5
+            if not retry or waited > 3600:
+                raise
+            say("the server refused the upload (busy); waiting", quiet)
+            time.sleep(error.retry_after or 15)
+            waited += error.retry_after or 15
+
+
 def transcribe_file(server: Server, path: Path, title: str, speakers: bool, quiet: bool) -> dict:
     query = urllib.parse.urlencode({"filename": path.name, "title": title, "diarize": "true" if speakers else "false"})
     say(f"uploading {path.name} to {server.url}", quiet)
-    with path.open("rb") as audio:
-        job = server.call(
-            "POST", f"/api/transcriptions?{query}", body=audio, timeout=3600,
-            headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)},
-        )
+    job = start_job(server, path, query, quiet)
     stage, shown = None, -1.0
     try:
         while True:
@@ -231,6 +271,7 @@ def render_text(result: dict, timestamps: bool, speakers: bool) -> str:
 def cmd_transcribe(args) -> int:
     quiet = args.quiet
     server = Server(server_url(args.server), api_token(args.token))
+    check_server(server)
     episode = None
     with tempfile.TemporaryDirectory(prefix="scribe-") as scratch:
         local = Path(args.source).expanduser()
