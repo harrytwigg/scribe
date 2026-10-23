@@ -64,6 +64,13 @@ label.check { display: inline-flex; gap: 6px; align-items: center; }
 .toolbar .state.live { color: #d93025; font-weight: 600; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .file { display: flex; gap: 8px; align-items: center; }
+.stack { display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
+.stack label { display: flex; flex-direction: column; gap: 4px; }
+.stack label.check, .stack label.file { flex-direction: row; }
+.stack input[type="url"] { padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
+.stack .row button[type="button"] { background: var(--panel); color: var(--text); border-color: var(--line); }
+#tx-status { margin-top: 16px; }
+#tx-result { margin-top: 16px; }
 .result { margin-top: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-height: 80px; white-space: pre-wrap; }
 #login { max-width: 420px; margin: 48px auto; }
 #login-form { display: flex; gap: 8px; }

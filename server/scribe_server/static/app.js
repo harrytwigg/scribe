@@ -1,4 +1,4 @@
-// scribe GUI: model picker, live transcripts, history, try-a-clip. No build step.
+// scribe GUI: model picker, live transcripts, history, transcribe a file or podcast link, try-a-clip. No build step.
 
 const $ = (selector) => document.querySelector(selector);
 const el = (tag, attrs = {}, ...children) => {
@@ -338,7 +338,7 @@ class Viewer {
 
 // ---- routing: the tab and the open call live in the URL, so a refresh keeps them -------------
 
-const TABS = ['models', 'live', 'history', 'try'];
+const TABS = ['models', 'live', 'history', 'transcribe', 'try'];
 
 function route() {
   const [tab, id] = location.hash.slice(1).split('/');
@@ -414,6 +414,144 @@ function refreshLists() {
   if (currentTab === 'live') refreshLive().catch(() => {});
   if (currentTab === 'history') refreshHistory().catch(() => {});
 }
+
+// ---- transcribe: an uploaded file or a podcast link, as a background job ---------------------
+
+const TX_JOB = 'scribe-tx-job';
+const remembered = {
+  get() { try { return localStorage.getItem(TX_JOB); } catch { return null; } },
+  set(id) { try { id ? localStorage.setItem(TX_JOB, id) : localStorage.removeItem(TX_JOB); } catch {} },
+};
+let txJob = null; // the job being followed: { id, timer }
+
+function txBusy(busy) {
+  $('#tx-go').disabled = busy;
+  $('#tx-cancel').hidden = !busy;
+  if (!busy) $('#tx-progress').hidden = true;
+}
+
+function txStatus(text, progress = null) {
+  $('#tx-status').textContent = text;
+  $('#tx-status').className = 'hint';
+  const bar = $('#tx-progress');
+  bar.hidden = progress == null;
+  if (progress != null) bar.value = progress;
+}
+
+function txFail(message) {
+  txBusy(false);
+  $('#tx-status').textContent = message;
+  $('#tx-status').className = 'error';
+}
+
+/** POST the file itself as the body, with upload progress (fetch cannot report it). */
+function uploadFile(file, params, onProgress) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `/api/transcriptions?${new URLSearchParams(params)}`);
+    request.upload.onprogress = (event) => event.lengthComputable && onProgress(event.loaded / event.total);
+    request.onerror = () => reject(new Error('The upload failed: the server could not be reached.'));
+    request.onload = () => {
+      if (request.status === 401) { showLogin(); reject(new Unauthorised()); return; }
+      let body = {};
+      try { body = JSON.parse(request.responseText); } catch {}
+      if (request.status >= 200 && request.status < 300) resolve(body);
+      else reject(new Error(body.detail ?? request.statusText));
+    };
+    request.send(file);
+  });
+}
+
+const STAGES = { queued: 'Waiting…', fetching: 'Fetching the episode…', decoding: 'Decoding the audio…', transcribing: 'Transcribing…' };
+
+function follow(id) {
+  stopFollowing();
+  remembered.set(id);
+  txBusy(true);
+  let polling = false;
+  const tick = async () => {
+    if (polling) return; // the last poll is still out
+    polling = true;
+    try { await poll(); } finally { polling = false; }
+  };
+  const poll = async () => {
+    let job;
+    try { job = await api(`/api/transcriptions/${id}`); } catch (error) {
+      if (error instanceof Unauthorised) return;
+      stopFollowing();
+      remembered.set(null);
+      txFail(error.status === 404 ? 'That transcription is no longer on the server (it may have finished long ago: look in History).' : error.message);
+      return;
+    }
+    if (txJob?.id !== id) return;
+    if (job.status in STAGES) {
+      const what = job.episode ? ` ${job.episode.show ? `${job.episode.show}: ` : ''}${job.episode.title}` : '';
+      txStatus(`${STAGES[job.status]}${job.status === 'fetching' ? what : ''}`, job.status === 'transcribing' ? job.progress : null);
+      return;
+    }
+    stopFollowing();
+    remembered.set(null);
+    if (job.status === 'done') { txBusy(false); txStatus(''); await showTranscript(job); }
+    else txFail(job.status === 'cancelled' ? 'Cancelled.' : job.error ?? 'The transcription failed.');
+  };
+  txJob = { id, timer: setInterval(tick, 1500) };
+  tick();
+}
+
+function stopFollowing() {
+  if (txJob) clearInterval(txJob.timer);
+  txJob = null;
+}
+
+async function showTranscript(job) {
+  const session = await api(`/api/sessions/${job.session_id}`);
+  const r = job.result;
+  const text = session.utterances.map((u) => u.text).join('\n');
+  const copy = el('button', { type: 'button', onclick: async () => {
+    try { await navigator.clipboard.writeText(r.text); copy.textContent = 'Copied'; } catch { copy.textContent = 'Copy failed'; }
+  } }, 'Copy text');
+  $('#tx-result').replaceChildren(
+    el('div', { class: 'toolbar' },
+      el('h3', {}, session.title),
+      el('span', { class: 'state' }, `${(r.duration / 60).toFixed(1)} min of audio in ${(r.asr_ms / 1000).toFixed(1)} s · ${r.speakers} speaker${r.speakers === 1 ? '' : 's'}`),
+      ...['md', 'srt', 'json'].map((f) => el('a', { href: `/api/sessions/${session.id}/export?format=${f}` }, f.toUpperCase())),
+      copy,
+      el('a', { href: `#history/${session.id}` }, 'Open in History')),
+    r.note ? el('p', { class: 'hint' }, r.note) : '',
+    el('div', { id: 'tx-text', class: 'transcript' }, text ? session.utterances.map((u) => el('div', { class: 'line' },
+      el('time', {}, clock(u.started_at - session.started_at)),
+      el('span', { class: 'who', style: `--hue:${hue(u.speaker_id)}` }, u.speaker_name),
+      el('p', { style: 'margin:0' }, u.text))) : el('p', { class: 'hint' }, '(no speech)')));
+}
+
+$('#tx-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const file = $('#tx-file').files[0];
+  const link = $('#tx-link').value.trim();
+  if (!file && !link) return txFail('Choose an audio file or paste a podcast link.');
+  if (file && link) return txFail('Use either a file or a link, not both.');
+  const diarize = $('#tx-speakers').checked;
+  $('#tx-result').replaceChildren();
+  txBusy(true);
+  try {
+    let job;
+    if (file) {
+      txStatus('Uploading…', 0);
+      job = await uploadFile(file, { filename: file.name, diarize }, (done) => txStatus(`Uploading… ${Math.round(done * 100)}%`, done));
+    } else {
+      txStatus('Looking up the episode…');
+      job = await api('/api/transcriptions/link', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: link, diarize }),
+      });
+    }
+    follow(job.id);
+  } catch (error) { if (!(error instanceof Unauthorised)) txFail(error.message); }
+});
+
+$('#tx-cancel').addEventListener('click', async () => {
+  if (!txJob) return;
+  try { await api(`/api/transcriptions/${txJob.id}`, { method: 'DELETE' }); } catch {}
+});
 
 // ---- try it ----------------------------------------------------------------------------------
 
@@ -502,6 +640,7 @@ function start() {
   if (started) return;
   started = true;
   refreshModels();
+  if (remembered.get()) follow(remembered.get()); // a transcription that was running when the page reloaded
   // New and ended calls show up in the lists without a refresh.
   setInterval(refreshLists, POLL_MS);
 }

@@ -19,6 +19,7 @@ dependencies = [
   "nvidia-cublas-cu12",
   "sherpa-onnx==1.13.8",
   "sherpa-onnx-core==1.13.8",
+  "av>=19.0.1",
 ]
 
 [dependency-groups]
@@ -30,6 +31,7 @@ dev = [
 
 [project.scripts]
 scribe-server = "scribe_server.__main__:main"
+scribe = "scribe_server.cli:main"
 
 [build-system]
 requires = ["hatchling"]

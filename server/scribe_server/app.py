@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import tempfile
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
 
-from . import exports
+from . import exports, podcast
 from .audio import RATE, AudioError, Vad, decode, speech_chunks, speech_spans
 from .auth import COOKIE, Auth
 from .diarize import DiarizerSlot, Speaker, SpeakerBook, Turn
@@ -40,6 +42,8 @@ class Services:
     # Host headers the server answers to; None skips the check (tests). Stops DNS rebinding.
     allowed_hosts: list[str] | None = None
     max_upload_bytes: int = 512 * 1024 * 1024
+    # Fetches a pasted podcast link for the GUI; None makes one that refuses non-public addresses.
+    fetcher: podcast.Fetcher | None = None
     # Holds the number of open sessions, for the host's idle check to read without a token.
     open_sessions_file: Path | None = None
     # A browser session with no line or heartbeat for this long is ended: the browser quit or
@@ -60,6 +64,33 @@ class Transcript:
     model_id: str | None
     asr_ms: int
     duration_s: float
+
+
+@dataclass
+class Job:
+    """A transcription running in the background (an upload or a pasted link)."""
+
+    id: str
+    title: str
+    status: str = "queued"  # queued, fetching, decoding, transcribing, done, error, cancelled
+    progress: float = 0.0  # of the transcribing, 0 to 1
+    error: str | None = None
+    session_id: str | None = None
+    episode: dict | None = None
+    result: dict | None = None
+    created: float = field(default_factory=time.time)
+    finished: float | None = None
+    task: asyncio.Task | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.status in ("queued", "fetching", "decoding", "transcribing")
+
+    def public(self) -> dict:
+        return {
+            "id": self.id, "title": self.title, "status": self.status, "progress": round(self.progress, 3),
+            "error": self.error, "session_id": self.session_id, "episode": self.episode, "result": self.result,
+        }
 
 
 class Hub:
@@ -147,6 +178,7 @@ def create_app(services: Services) -> FastAPI:
     # from the restart, so it gets the full grace period.
     last_seen: dict[str, float] = {}
     booted = time.time()
+    jobs: dict[str, Job] = {}
 
     def touch(session_id: str) -> None:
         last_seen[session_id] = time.time()
@@ -177,7 +209,8 @@ def create_app(services: Services) -> FastAPI:
     def write_open_sessions() -> None:
         if s.open_sessions_file:
             tmp = s.open_sessions_file.with_suffix(".tmp")
-            tmp.write_text(f"{s.store.count_open_sessions()}\n")
+            # A running transcription keeps the host awake like an open call does.
+            tmp.write_text(f"{s.store.count_open_sessions() + sum(job.active for job in jobs.values())}\n")
             tmp.replace(s.open_sessions_file)
 
     write_open_sessions()
@@ -387,9 +420,10 @@ def create_app(services: Services) -> FastAPI:
             return {"text": result.text, "model": result.model_id, "duration": result.duration_s, "asr_ms": result.asr_ms}
         return {"text": result.text}
 
-    async def diarized_file(data: bytes, model: str | None, response_format: str, diarizer):
+    async def diarized_segments(audio: np.ndarray, diarizer) -> dict:
+        """Who spoke when, with the text of each turn: `segments`, `text`, `model`, `duration`,
+        `asr_ms` and `speakers`. Raises HTTPException when the GPU queue is full."""
         started = time.monotonic()
-        audio = await decode_upload(data, model)
         try:
             turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio))
         except HTTPException:
@@ -408,22 +442,207 @@ def create_app(services: Services) -> FastAPI:
              "end": round(t.end, 2), "text": r.text}
             for t, n, r in kept
         ]
-        text = "\n".join(f"{seg['speaker']}: {seg['text']}" for seg in segments)
+        return {
+            "text": "\n".join(f"{seg['speaker']}: {seg['text']}" for seg in segments),
+            "model": next((r.model_id for r in results if r.model_id), s.models.active_id),
+            "duration": len(audio) / RATE, "asr_ms": int((time.monotonic() - started) * 1000),
+            "segments": segments, "speakers": len(numbers),
+        }
+
+    async def diarized_file(data: bytes, model: str | None, response_format: str, diarizer):
+        out = await diarized_segments(await decode_upload(data, model), diarizer)
         if response_format == "text":
-            return PlainTextResponse(text)
+            return PlainTextResponse(out["text"])
         if response_format == "verbose_json":
-            model_id = next((r.model_id for r in results if r.model_id), s.models.active_id)
-            return {
-                "text": text, "model": model_id, "duration": len(audio) / RATE,
-                "asr_ms": int((time.monotonic() - started) * 1000), "segments": segments,
-                "speakers": len(numbers),
-            }
-        return {"text": text}
+            return out
+        return {"text": out["text"]}
 
     @app.get("/v1/models", dependencies=[Depends(guard)])
     def openai_models() -> dict:
         active = s.models.active_id
         return {"object": "list", "data": [{"id": active, "object": "model", "owned_by": "scribe"}] if active else []}
+
+    # -- background transcriptions: an uploaded recording or a pasted podcast link ----------------
+    # The result is stored as a session (source "upload") when it is done, so History, its exports
+    # and the speaker names work as for a call. The job itself lives in memory for an hour so a
+    # client can poll it; a restart forgets running jobs.
+
+    JOB_KEEP_S = 3600
+    VAD_WINDOW_S = 600  # speech detection runs over this much audio per GPU-queue turn
+
+    def new_job(title: str) -> Job:
+        now = time.time()
+        for old in [j for j in jobs.values() if not j.active and now - (j.finished or now) > JOB_KEEP_S]:
+            jobs.pop(old.id, None)
+        job = Job(id=uuid.uuid4().hex[:12], title=one_line(title)[:120] or "Recording")
+        jobs[job.id] = job
+        write_open_sessions()
+        return job
+
+    def job_or_404(job_id: str) -> Job:
+        if job_id not in jobs:
+            raise HTTPException(404, "no such transcription (finished ones are forgotten after an hour)")
+        return jobs[job_id]
+
+    async def patient(worker: GpuWorker, fn, wait_s: float = 900):
+        """Run on a worker, waiting for room in its queue: a background job yields to live calls
+        rather than failing when they fill it."""
+        deadline = time.monotonic() + wait_s
+        while True:
+            try:
+                return await worker.run(fn)
+            except QueueFull:
+                if time.monotonic() > deadline:
+                    raise
+                await asyncio.sleep(0.5)
+
+    def asr_chunk(chunk: np.ndarray) -> tuple[str, str]:
+        model = s.models.acquire()
+        try:
+            return model.engine.transcribe(chunk), model.id
+        finally:
+            s.models.release(model)
+
+    async def plain_segments(audio: np.ndarray, job: Job) -> dict:
+        """One speaker: each stretch of speech (up to 25 s) with its start and end. Every chunk is
+        its own turn at the GPU queue, so a long recording never holds up a live call."""
+        started = time.monotonic()
+        window = VAD_WINDOW_S * RATE
+        spans: list[tuple[int, int]] = []
+        for offset in range(0, len(audio), window):
+            part = audio[offset : offset + window]
+            found = await patient(s.worker, lambda part=part: speech_spans(part, s.vad))
+            spans += [(a + offset, b + offset) for a, b in found]
+        segments, model_id = [], s.models.active_id
+        for index, (a, b) in enumerate(spans, 1):
+            text, model_id = await patient(s.worker, lambda a=a, b=b: asr_chunk(audio[a:b]))
+            if text.strip():
+                segments.append({"speaker": "Speaker 1", "start": round(a / RATE, 2), "end": round(b / RATE, 2), "text": text.strip()})
+            job.progress = index / len(spans)
+        return {
+            "text": " ".join(seg["text"] for seg in segments), "model": model_id, "duration": len(audio) / RATE,
+            "asr_ms": int((time.monotonic() - started) * 1000), "segments": segments, "speakers": 1 if segments else 0,
+        }
+
+    def store_result(job: Job) -> str:
+        """The finished job as an ended session; returns its id."""
+        result = job.result
+        session = s.store.create_session("upload", job.title)
+        names = {}
+        for index, seg in enumerate(result["segments"]):
+            key = names.setdefault(seg["speaker"], f"s{len(names) + 1}")
+            s.store.add_utterance(
+                session["id"], key, seg["speaker"], session["started_at"] + seg["start"],
+                int(max(seg["end"] - seg["start"], 0) * 1000), seg["text"], result["model"], None, f"seg{index}",
+            )
+        s.store.end_session(session["id"])
+        return session["id"]
+
+    async def run_job(job: Job, source, diarize: bool) -> None:
+        """`source` is an awaitable giving the audio bytes (it may fetch them first)."""
+        try:
+            job.status = "fetching"
+            data = await source(job)
+            job.status = "decoding"
+            audio = await decode_upload(data)
+            del data
+            job.status = "transcribing"
+            diarizer = s.diarization.ready() if diarize else None
+            for attempt in range(60):  # a full queue is not the job's failure: wait for room
+                try:
+                    job.result = await (diarized_segments(audio, diarizer) if diarizer else plain_segments(audio, job))
+                    break
+                except HTTPException as busy:
+                    if busy.status_code != 503 or "Retry-After" not in (busy.headers or {}) or attempt == 59:
+                        raise
+                    await asyncio.sleep(2)
+            if diarize and not diarizer:
+                job.result["note"] = "Speaker separation is not ready yet: transcribed as one speaker."
+            job.session_id = await asyncio.to_thread(store_result, job)
+            job.status = "done"
+            job.progress = 1.0
+        except asyncio.CancelledError:
+            job.status, job.error = "cancelled", "cancelled"
+            raise
+        except HTTPException as error:
+            job.status, job.error = "error", str(error.detail)
+        except (podcast.PodcastError, AudioError, NoActiveModel, QueueFull) as error:
+            job.status, job.error = "error", str(error)
+        except Exception as error:
+            log.exception("transcription %s failed", job.id)
+            job.status, job.error = "error", f"transcription failed: {error}"
+        finally:
+            job.finished = time.time()
+            job.task = None
+            write_open_sessions()
+
+    def start_job(job: Job, source, diarize: bool) -> dict:
+        job.task = asyncio.create_task(run_job(job, source, diarize))
+        return job.public()
+
+    def require_model() -> None:
+        if s.models.active_id is None:
+            raise HTTPException(503, "no model is active; pick one in the GUI")
+
+    @app.post("/api/transcriptions", dependencies=[Depends(guard)], status_code=202)
+    async def start_upload(request: Request, filename: str = "", title: str = "", diarize: bool = False) -> dict:
+        """The request body is the audio file itself (any format `decode` reads). Returns the job
+        to poll at GET /api/transcriptions/{id}."""
+        require_model()
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > s.max_upload_bytes:
+            raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
+        body = bytearray()
+        async for part in request.stream():
+            body += part
+            if len(body) > s.max_upload_bytes:
+                raise HTTPException(413, f"upload larger than {s.max_upload_bytes // (1024 * 1024)} MB")
+        if not body:
+            raise HTTPException(400, "the request body is empty: send the audio file as the body")
+        held = [bytes(body)]
+        del body
+
+        async def source(_: Job) -> bytes:
+            return held.pop()  # the job keeps no other reference, so the bytes go once decoded
+
+        return start_job(new_job(title or Path(filename).stem or "Recording"), source, diarize)
+
+    class LinkJob(BaseModel):
+        url: str
+        diarize: bool = False
+        episode: int = 1  # of a show or feed link: 1 is the newest
+
+    @app.post("/api/transcriptions/link", dependencies=[Depends(guard)], status_code=202)
+    async def start_link(body: LinkJob) -> dict:
+        """Fetch the podcast episode a link names (Spotify, Apple Podcasts, an RSS feed or an audio
+        URL; docs/cli.md) and transcribe it. Returns the job to poll."""
+        require_model()
+        fetcher = s.fetcher or podcast.Fetcher(public_only=True)
+        job = new_job("Podcast")
+
+        async def source(job: Job) -> bytes:
+            def fetch() -> tuple[podcast.Episode, bytes]:
+                episode = podcast.resolve(fetcher, body.url.strip(), body.episode)
+                job.episode = episode.to_json()
+                job.title = one_line(f"{episode.show}: {episode.title}" if episode.show else episode.title)[:120]
+                with tempfile.TemporaryDirectory(prefix="scribe-dl-") as directory:
+                    path = podcast.download(fetcher, episode.audio_url, Path(directory), "episode", limit=s.max_upload_bytes)
+                    return episode, path.read_bytes()
+
+            return (await asyncio.to_thread(fetch))[1]
+
+        return start_job(job, source, body.diarize)
+
+    @app.get("/api/transcriptions/{job_id}", dependencies=[Depends(guard)])
+    def get_job(job_id: str) -> dict:
+        return job_or_404(job_id).public()
+
+    @app.delete("/api/transcriptions/{job_id}", dependencies=[Depends(guard)])
+    def cancel_job(job_id: str) -> dict:
+        job = job_or_404(job_id)
+        if job.active and job.task:
+            job.task.cancel()
+        return {"ok": True}
 
     # -- sessions -------------------------------------------------------------------------------
 
