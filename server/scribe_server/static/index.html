@@ -48,22 +48,21 @@
     </section>
 
     <section id="tab-transcribe" class="tab" hidden>
-      <p class="hint">Transcribe a recording or a podcast episode with the active model. The transcript is kept in History.</p>
+      <p class="hint">Transcribe recordings or podcast episodes with the active model. Add as many as you like: they queue and run a couple at a time. Transcripts are kept in History.</p>
       <form id="tx-form" class="stack">
-        <label class="file">Audio file <input id="tx-file" type="file" accept="audio/*,video/mp4,video/webm,.wav,.flac,.ogg,.opus,.mp3,.m4a,.aac"></label>
-        <label>or a podcast link
-          <input id="tx-link" type="url" placeholder="https://open.spotify.com/episode/… (or Apple Podcasts, an RSS feed, an mp3)">
+        <label class="file">Audio files <input id="tx-file" type="file" multiple accept="audio/*,video/mp4,video/webm,.wav,.flac,.ogg,.opus,.mp3,.m4a,.aac"></label>
+        <label>or podcast links, one per line
+          <textarea id="tx-links" rows="3" placeholder="https://open.spotify.com/episode/…&#10;(Apple Podcasts, an RSS feed or an mp3 work too)"></textarea>
         </label>
         <p class="hint">Spotify's own audio is protected, so a Spotify link is fetched from the show's public RSS feed; a Spotify exclusive has none and cannot be transcribed from its link.</p>
         <div class="row">
           <label class="check"><input id="tx-speakers" type="checkbox"> Separate speakers</label>
           <button id="tx-go" type="submit">Transcribe</button>
-          <button id="tx-cancel" type="button" hidden>Cancel</button>
         </div>
       </form>
       <div id="tx-status" class="hint" aria-live="polite"></div>
-      <progress id="tx-progress" max="1" hidden></progress>
-      <div id="tx-result"></div>
+      <div id="tx-summary" class="hint"></div>
+      <ul id="tx-queue" class="queue"></ul>
     </section>
 
     <section id="tab-try" class="tab" hidden>

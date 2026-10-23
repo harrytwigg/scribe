@@ -168,28 +168,102 @@ def test_a_busy_queue_makes_a_job_wait_not_fail(tmp_path):
         h.worker.stop()
 
 
-def test_only_max_jobs_run_at_once_and_a_refused_upload_leaves_nothing(tmp_path, monkeypatch):
+def test_jobs_beyond_max_jobs_wait_their_turn_in_order(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     h = Harness(tmp_path / "h")
     h.services.max_jobs = 1
+    h.services.max_queued = 2
     h.services.open_sessions_file = tmp_path / "open"
     h.ready("alpha")
-    h.loader.engines["alpha"].delay = 0.3
+    h.loader.engines["alpha"].delay = 0.2
     try:
         with h.client as c:
-            first = upload(c).json()["id"]
-            busy = upload(c)
-            assert busy.status_code == 429 and busy.headers["Retry-After"] == "30"
-            assert c.post("/api/transcriptions/link", json={"url": "https://x.test/a.mp3"}).status_code == 429
-            assert (tmp_path / "open").read_text().strip() == "1"
+            a, b, d = (upload(c, title=name).json()["id"] for name in ("A", "B", "D"))
+            assert [c.get(f"/api/transcriptions/{i}").json()["queue_position"] for i in (a, b, d)] == [None, 1, 2]
+            assert [c.get(f"/api/transcriptions/{i}").json()["status"] for i in (b, d)] == ["queued", "queued"]
+            assert c.get("/api/status").json()["transcriptions"] == {"running": 1, "queued": 2, "max": 1}
+            assert (tmp_path / "open").read_text().strip() == "3"  # the queue keeps the host awake
+            # the queue is bounded; a refused upload leaves no job or file behind
+            full = upload(c)
+            assert full.status_code == 429 and full.headers["Retry-After"] == "60"
+            # cancelling a waiting job moves the ones behind it up
+            c.delete(f"/api/transcriptions/{b}")
+            assert c.get(f"/api/transcriptions/{b}").json()["status"] == "cancelled"
+            assert c.get(f"/api/transcriptions/{d}").json()["queue_position"] == 1
+            assert wait(c, a)["status"] == "done" and wait(c, d)["status"] == "done"
+            # D ran after A (one at a time): its transcript was stored later
+            sessions = {s["title"]: s for s in c.get("/api/sessions").json()}
+            assert sessions["A"]["started_at"] < sessions["D"]["started_at"] and "B" not in sessions
             # a body over the limit, streamed without a length, is refused and frees its slot
-            assert wait(c, first)["status"] == "done"
             h.services.max_upload_bytes = 100
             assert c.post("/api/transcriptions", content=iter([b"x" * 60, b"x" * 60])).status_code == 413
-            assert (tmp_path / "open").read_text().strip() == "0"
             h.services.max_upload_bytes = 512 * 1024 * 1024
+            assert (tmp_path / "open").read_text().strip() == "0"
             assert wait(c, upload(c).json()["id"])["status"] == "done"
         assert list(tmp_path.glob("scribe-job-*")) == [], "the audio is not kept"
+    finally:
+        h.worker.stop()
+
+
+def test_one_progress_bar_covers_the_download_and_the_transcription(harness):
+    harness.ready("alpha")
+    audio = wav(two_stretches())
+
+    class SlowReply(FakeReply):
+        def read(self, n=-1):
+            time.sleep(0.03)
+            return super().read(min(n, 60_000) if n > 0 else n)
+
+    class SlowFetcher(FakeFetcher):
+        def request(self, url, headers=None):
+            body, content_type, *_ = self.pages[url]
+            return SlowReply(url, body, content_type)
+
+    harness.services.fetcher = SlowFetcher({"https://cdn.example.com/talk.wav": (audio, "audio/wav")})
+    harness.loader.engines["alpha"].delay = 0.1
+    seen = []
+    with harness.client as c:
+        job_id = c.post("/api/transcriptions/link", json={"url": "https://cdn.example.com/talk.wav"}).json()["id"]
+        while True:
+            job = c.get(f"/api/transcriptions/{job_id}").json()
+            seen.append(job)
+            if job["status"] in ("done", "error"):
+                break
+            time.sleep(0.02)
+    assert job["status"] == "done", job
+    progress = [j["progress"] for j in seen]
+    assert progress == sorted(progress) and progress[-1] == 1.0, "one bar that only moves forward"
+    downloading = [j for j in seen if j["status"] == "fetching" and j["download"]["done"]]
+    assert downloading and all(j["download"]["total"] == len(audio) for j in downloading)
+    assert 0 < max(j["progress"] for j in downloading) <= 0.15, "the download is the first stretch of the bar"
+    assert {j["status"] for j in seen} >= {"fetching", "transcribing", "done"}
+    transcribing = [j["progress"] for j in seen if j["status"] == "transcribing"]
+    assert transcribing and min(transcribing) >= 0.2 and max(transcribing) <= 1.0  # 1.0 while the transcript is being stored
+
+
+def test_an_uploaded_files_bar_starts_at_decoding_and_has_no_download(harness):
+    harness.ready("alpha")
+    with harness.client as c:
+        first = upload(c).json()
+        assert first["download"] is None and first["progress"] <= 0.05
+        job = wait(c, first["id"])
+        assert job["progress"] == 1.0 and job["stage_progress"] == 1.0
+
+
+def test_separating_speakers_says_what_the_job_is_doing(tmp_path):
+    h = Harness(tmp_path)
+    h.services.diarization = DiarizerSlot(FakeDiarizer())
+    h.ready()
+    audio = np.concatenate([silence(0.5), pitch(300, 2), silence(1), pitch(500, 2), silence(0.5)])
+    try:
+        with h.client as c:
+            job_id = upload(c, audio, diarize="true").json()["id"]
+            steps = set()
+            while (job := c.get(f"/api/transcriptions/{job_id}").json())["status"] not in ("done", "error"):
+                steps.add(job["step"])
+                time.sleep(0.01)
+            assert job["status"] == "done"
+            assert "separating speakers" in steps or job["step"] == "separating speakers"
     finally:
         h.worker.stop()
 

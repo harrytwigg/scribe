@@ -8,6 +8,8 @@ kind of failure.
 scribe transcribe https://open.spotify.com/episode/3tdrNundncNjVFHyNy9zXM   # prints the transcript
 scribe transcribe talk.m4a --speakers --format srt --out talk.srt           # writes talk.srt, prints its path
 scribe resolve https://open.spotify.com/episode/...                        # what would be fetched; no download
+scribe transcribe LINK1 LINK2 talk.m4a --out transcripts/ --format md       # a queue: one file per source
+scribe transcribe --from links.txt --format json > all.json                # sources from a file, one per line
 ```
 
 On harry-box it is installed by `deploy/install.sh` at `~/.local/bin/scribe`. From a checkout:
@@ -18,7 +20,7 @@ scribe-server`) with a model active (the default, Parakeet, is activated at star
 
 | Command | Does |
 | --- | --- |
-| `scribe transcribe SOURCE` | Fetch the audio (if SOURCE is a link) and transcribe it. |
+| `scribe transcribe SOURCE...` | Fetch the audio (if a SOURCE is a link) and transcribe it. Several SOURCEs, or `--from FILE`, are queued and run in turn. |
 | `scribe resolve LINK` | Print the episode a link names and its audio URL as JSON. `--list` lists the show's newest episodes. Downloads nothing. |
 | `scribe download LINK --out DIR` | Download the audio only; prints the file's path. |
 | `scribe status` | The server's state as JSON: active model, queue depth. |
@@ -55,7 +57,8 @@ Spotify pages likewise fail.
 | Option | Meaning |
 | --- | --- |
 | `--format text\|json\|srt\|md` | Output format (default `text`). `json` is the one for programs. |
-| `--out FILE` | Write the transcript to FILE (parents created) and print the path, instead of printing the transcript. |
+| `--out FILE` | Write the transcript to FILE (parents created) and print the path, instead of printing the transcript. With several sources, a directory: `01-<title>.<ext>`, `02-...`, one path printed per file (and an `index.json` with `--format json`). |
+| `--from FILE` | Also read SOURCEs from FILE, one per line (`-` is stdin; blank lines and `#` comments are skipped). |
 | `--speakers` | Separate speakers: `Speaker 1`, `Speaker 2`, ... (slower; CPU diarization on the server). |
 | `--timestamps` | `text` format only: start each line with `[hh:mm:ss]`. |
 | `--episode N` | Of a show or feed: the Nth newest episode (default 1). |
@@ -88,7 +91,17 @@ treat `date` and `duration` both `null` or a `title` below 1 as a weaker match w
 turns with `--speakers`) with start and end in seconds. `session_id` is the History entry
 (`null` with `--no-save`).
 
-On failure with `--format json`, stdout is `{"error": {"kind", "message", "exit_code"}}` (and
+### Several sources
+
+The sources are fetched and uploaded one after another and the server queues them (2 run at once;
+the rest wait their turn, in order), so the transcribing of one overlaps the downloading of the
+next. Without `--out`, text/srt/md transcripts are printed in order, each under a `=== title (source) ===`
+line, and `--format json` prints one JSON array with an entry per source, in order:
+`{"ok": true, ...the object above}` or `{"ok": false, "source", "error": {"kind", "message", "exit_code"}}`.
+A source that fails does not stop the others; its error is on stderr too. A SOURCE that is neither a link
+nor an existing file is a usage error (exit 2) before anything is sent.
+
+On failure with `--format json` (one source), stdout is `{"error": {"kind", "message", "exit_code"}}` (and
 the message is on stderr either way).
 
 ## Exit codes
@@ -101,6 +114,7 @@ the message is on stderr either way).
 | 4 | Network or download failure (the link, the feed or the audio host). May be transient. |
 | 5 | The scribe server is unreachable, rejected the token, has no active model, or refused the upload (too large) |
 | 6 | The server failed to transcribe (undecodable audio, internal error) |
+| 7 | Several sources: some succeeded and some failed (each failure is in the JSON array and on stderr). If every source failed, the first failure's code is used |
 | 130 | Interrupted (the running transcription is cancelled on the server) |
 
 ## Configuration
@@ -116,7 +130,8 @@ the message is on stderr either way).
 
 - Audio is uploaded to the server (one request, up to 512 MB; streamed to a temporary file there and
   deleted once decoded) and transcribed as a background job; the CLI polls it. The server runs at most
-  2 transcriptions at once; `scribe` waits and retries while it is busy. A 15-minute episode takes about 15 s with Parakeet on the GPU. A long episode
+  2 transcriptions at once and queues up to 50 more, first come first served; progress lines say
+  `queued (position N)`, `decoding`, `transcribing 40%`. A 15-minute episode takes about 15 s with Parakeet on the GPU. A long episode
   yields to live calls: its speech is transcribed chunk by chunk through the same queue.
 - `--speakers` on a long recording holds the GPU for that recording's whole transcription in one
   piece (a live call waits for it); prefer it for recordings of an hour or less.
@@ -127,9 +142,13 @@ the message is on stderr either way).
 
 ## The same thing in the browser
 
-The dashboard's **Transcribe** tab takes an uploaded audio file or a pasted podcast link (resolved
-by the server the same way, public addresses only) and shows the transcript with exports; it is
+The dashboard's **Transcribe** tab takes uploaded audio files (several at once) or pasted podcast links
+(one per line; resolved by the server the same way, public addresses only). Each becomes a row in a
+queue with its own progress bar covering the whole job (downloading a link, decoding, transcribing,
+or its place in the queue) and a Cancel button; a finished row shows the transcript with exports and is
 saved in History. The server API behind both: `POST /api/transcriptions` (body = the audio file;
 `?filename=&title=&diarize=`), `POST /api/transcriptions/link` (`{"url", "diarize", "episode"}`),
-`GET /api/transcriptions/{id}` (poll: `status`, `progress`, `error`, `result`, `session_id`),
+`GET /api/transcriptions/{id}` (poll: `status` of queued, fetching, decoding, transcribing, done, error or
+cancelled; `progress` 0 to 1 over the whole job, `stage_progress` of the transcribing, `download` {done, total}
+bytes for a link, `queue_position`, `step`, `error`, `result`, `session_id`),
 `DELETE /api/transcriptions/{id}` (cancel). Same token as the rest of the API.

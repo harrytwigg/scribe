@@ -26,13 +26,15 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 
 ### Podcasts and recordings
 
-- **Transcribe** tab: upload an audio file, or paste a Spotify, Apple Podcasts, RSS or mp3 link. The
-  transcript appears with Markdown/SRT/JSON export and is kept in **History**.
+- **Transcribe** tab: upload audio files, or paste Spotify, Apple Podcasts, RSS or mp3 links (one per
+  line). They queue; each row has a progress bar for the download, decoding and transcribing, and
+  shows its transcript with Markdown/SRT/JSON export when done. Transcripts are kept in **History**.
 - **CLI** (for scripts and agents; `deploy/install.sh` puts it at `~/.local/bin/scribe`):
 
   ```sh
   scribe transcribe https://open.spotify.com/episode/<id>            # transcript on stdout
   scribe transcribe talk.m4a --speakers --format json --out talk.json
+  scribe transcribe LINK1 LINK2 LINK3 --out transcripts/            # a queue, one file each
   ```
 
   Spotify's own audio is DRM-protected, so a Spotify link is resolved to the show's public RSS copy

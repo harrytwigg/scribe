@@ -46,8 +46,10 @@ class Services:
     max_upload_bytes: int = 512 * 1024 * 1024
     # Fetches a pasted podcast link for the GUI; None makes one that refuses non-public addresses.
     fetcher: podcast.Fetcher | None = None
-    # Transcriptions running at once (each holds a decoded recording in memory); more wait at the client.
+    # Transcriptions running at once (each holds a decoded recording in memory); the rest queue.
     max_jobs: int = 2
+    # Transcriptions waiting (beyond the running ones) before a new one is refused with 429.
+    max_queued: int = 50
     # Holds the number of open sessions, for the host's idle check to read without a token.
     open_sessions_file: Path | None = None
     # A browser session with no line or heartbeat for this long is ended: the browser quit or
@@ -72,12 +74,16 @@ class Transcript:
 
 @dataclass
 class Job:
-    """A transcription running in the background (an upload or a pasted link)."""
+    """A transcription in the background (an upload or a pasted link)."""
 
     id: str
     title: str
     status: str = "queued"  # queued, fetching, decoding, transcribing, done, error, cancelled
-    progress: float = 0.0  # of the transcribing, 0 to 1
+    stage_progress: float = 0.0  # of the transcribing, 0 to 1
+    fetches: bool = False  # a link: it downloads the audio itself (an upload arrives complete)
+    fetch_done: int = 0  # bytes downloaded so far, and how many there will be (0: not told)
+    fetch_total: int = 0
+    step: str | None = None  # what a stage with no measure is doing ("separating speakers")
     error: str | None = None
     session_id: str | None = None
     episode: dict | None = None
@@ -92,10 +98,32 @@ class Job:
     def active(self) -> bool:
         return self.status in ("queued", "fetching", "decoding", "transcribing")
 
-    def public(self) -> dict:
+    @property
+    def running(self) -> bool:  # has a slot: not waiting its turn
+        return self.status in ("fetching", "decoding", "transcribing")
+
+    @property
+    def progress(self) -> float:
+        """Overall, 0 to 1: the download (a link only), decoding, then transcribing, weighted by
+        about how long each takes, so one bar covers the whole job."""
+        fetch, decode = (0.15, 0.05) if self.fetches else (0.0, 0.05)
+        if self.status == "done":
+            return 1.0
+        if self.status == "fetching":
+            return fetch * (min(self.fetch_done / self.fetch_total, 1.0) if self.fetch_total else 0.0)
+        if self.status == "decoding":
+            return fetch
+        if self.status == "transcribing":
+            return fetch + decode + (1 - fetch - decode) * self.stage_progress
+        return 0.0
+
+    def public(self, position: int | None = None) -> dict:
         return {
             "id": self.id, "title": self.title, "status": self.status, "progress": round(self.progress, 3),
-            "error": self.error, "session_id": self.session_id, "episode": self.episode, "result": self.result,
+            "stage_progress": round(self.stage_progress, 3), "step": self.step,
+            "download": {"done": self.fetch_done, "total": self.fetch_total} if self.fetches else None,
+            "queue_position": position, "error": self.error, "session_id": self.session_id,
+            "episode": self.episode, "result": self.result,
         }
 
 
@@ -378,7 +406,11 @@ def create_app(services: Services) -> FastAPI:
             "queue_depth": s.worker.depth,
             "open_sessions": s.store.count_open_sessions(),
             "diarization": s.diarization.status,
-            "transcriptions": {"running": sum(job.active for job in jobs.values()), "max": s.max_jobs},
+            "transcriptions": {
+                "running": sum(job.running for job in jobs.values()),
+                "queued": sum(job.status == "queued" for job in jobs.values()),
+                "max": s.max_jobs,
+            },
         }
 
     @app.get("/api/models", dependencies=[Depends(guard)])
@@ -482,19 +514,35 @@ def create_app(services: Services) -> FastAPI:
         for old in [j for j in jobs.values() if not j.active and now - (j.finished or now) > JOB_KEEP_S]:
             jobs.pop(old.id, None)
 
-    def new_job(title: str) -> Job:
-        """A job slot, or 429 when `max_jobs` are already running (the client retries)."""
+    def new_job(title: str, fetches: bool = False) -> Job:
+        """A queued job, or 429 when `max_queued` are already waiting."""
         prune_jobs()
-        if sum(job.active for job in jobs.values()) >= s.max_jobs:
+        if sum(job.active for job in jobs.values()) >= s.max_jobs + s.max_queued:
             raise HTTPException(
-                429, f"{s.max_jobs} transcriptions are already running; try again when one finishes",
-                headers={"Retry-After": "30"},
+                429, f"{s.max_queued} transcriptions are already waiting; try again when some finish",
+                headers={"Retry-After": "60"},
             )
-        job = Job(id=uuid.uuid4().hex[:12], title=one_line(title)[:120] or "Recording")
+        job = Job(id=uuid.uuid4().hex[:12], title=one_line(title)[:120] or "Recording", fetches=fetches)
         job.work = Path(tempfile.mkdtemp(prefix="scribe-job-"))
         jobs[job.id] = job
         write_open_sessions()
         return job
+
+    def queue_position(job: Job) -> int | None:
+        """1 for the next job to start; None once it has a slot."""
+        if job.status != "queued":
+            return None
+        waiting = [j.id for j in jobs.values() if j.status == "queued"]  # in the order they came
+        return waiting.index(job.id) + 1
+
+    async def wait_for_slot(job: Job) -> None:
+        """First come, first served, at most `max_jobs` at once."""
+        while True:
+            first = next((j for j in jobs.values() if j.status == "queued"), None)
+            if first is job and sum(j.running for j in jobs.values()) < s.max_jobs:
+                job.status = "fetching"
+                return
+            await asyncio.sleep(0.25)
 
     def discard_job(job: Job) -> None:
         """Forget a job that never started (its request was refused)."""
@@ -537,12 +585,13 @@ def create_app(services: Services) -> FastAPI:
             part = audio[offset : offset + window]
             found = await patient(s.worker, lambda part=part: speech_spans(part, s.vad))
             spans += [(a + offset, b + offset) for a, b in found]
+            job.stage_progress = 0.1 * min(offset + window, len(audio)) / len(audio)  # finding the speech: the first tenth
         segments, model_id = [], s.models.active_id
         for index, (a, b) in enumerate(spans, 1):
             text, model_id = await patient(s.worker, lambda a=a, b=b: asr_chunk(audio[a:b]))
             if text.strip():
                 segments.append({"speaker": "Speaker 1", "start": round(a / RATE, 2), "end": round(b / RATE, 2), "text": text.strip()})
-            job.progress = index / len(spans)
+            job.stage_progress = 0.1 + 0.9 * index / len(spans)
         return {
             "text": " ".join(seg["text"] for seg in segments), "model": model_id, "duration": len(audio) / RATE,
             "asr_ms": int((time.monotonic() - started) * 1000), "segments": segments, "speakers": 1 if segments else 0,
@@ -565,13 +614,14 @@ def create_app(services: Services) -> FastAPI:
     async def run_job(job: Job, source, diarize: bool) -> None:
         """`source` is an awaitable giving the path of the audio file in `job.work` (it may fetch it first)."""
         try:
-            job.status = "fetching"
+            await wait_for_slot(job)
             path = await source(job)
             job.status = "decoding"
             audio = await decode_upload(path)
             shutil.rmtree(job.work, ignore_errors=True)  # no audio is kept
             job.status = "transcribing"
             diarizer = s.diarization.ready() if diarize else None
+            job.step = "separating speakers" if diarizer else None
             for attempt in range(60):  # a full queue is not the job's failure: wait for room
                 try:
                     job.result = await (diarized_segments(audio, diarizer) if diarizer else plain_segments(audio, job))
@@ -584,7 +634,7 @@ def create_app(services: Services) -> FastAPI:
                 job.result["note"] = "Speaker separation is not ready yet: transcribed as one speaker."
             job.session_id = await asyncio.to_thread(store_result, job)
             job.status = "done"
-            job.progress = 1.0
+            job.stage_progress = 1.0
         except asyncio.CancelledError:
             job.status, job.error = "cancelled", "cancelled"
             raise
@@ -603,7 +653,7 @@ def create_app(services: Services) -> FastAPI:
 
     def start_job(job: Job, source, diarize: bool) -> dict:
         job.task = asyncio.create_task(run_job(job, source, diarize))
-        return job.public()
+        return job.public(queue_position(job))
 
     def require_model() -> None:
         if s.models.active_id is None:
@@ -649,12 +699,13 @@ def create_app(services: Services) -> FastAPI:
         URL; docs/cli.md) and transcribe it. Returns the job to poll."""
         require_model()
         fetcher = s.fetcher or podcast.Fetcher(public_only=True)
-        job = new_job("Podcast")
+        job = new_job("Podcast", fetches=True)
 
         async def source(job: Job) -> Path:
-            def aborted(*_) -> None:
+            def aborted(done: int = 0, total: int | None = None) -> None:
                 if job.cancel.is_set():  # called as the download streams: stops it
                     raise podcast.PodcastError("cancelled")
+                job.fetch_done, job.fetch_total = done, total or 0
 
             def fetch() -> Path:
                 episode = podcast.resolve(fetcher, body.url.strip(), body.episode)
@@ -669,7 +720,8 @@ def create_app(services: Services) -> FastAPI:
 
     @app.get("/api/transcriptions/{job_id}", dependencies=[Depends(guard)])
     def get_job(job_id: str) -> dict:
-        return job_or_404(job_id).public()
+        job = job_or_404(job_id)
+        return job.public(queue_position(job))
 
     @app.delete("/api/transcriptions/{job_id}", dependencies=[Depends(guard)])
     async def cancel_job(job_id: str) -> dict:  # async: runs on the event loop with the jobs it stops

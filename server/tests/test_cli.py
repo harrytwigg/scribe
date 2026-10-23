@@ -175,17 +175,75 @@ def test_a_wrong_token_is_reported_before_a_large_upload(served, tmp_path, monke
     assert code == 5 and "rejected the token" in err and "cannot reach" not in err
 
 
-def test_a_busy_server_makes_the_cli_wait_and_retry(served, tmp_path, monkeypatch, capsys):
+def test_a_busy_server_queues_the_upload_and_the_cli_says_where_it_stands(served, tmp_path, capsys):
     served.services.max_jobs = 1
     served.loader.engines["alpha"].delay = 0.2
-    real_sleep = time.sleep
-    monkeypatch.setattr(cli, "time", types.SimpleNamespace(sleep=lambda s: real_sleep(0.05), monotonic=time.monotonic))  # not 15 s
     path = tmp_path / "talk.wav"
     path.write_bytes(AUDIO)
     first = cli.Server(served.url, "test-token").call("POST", "/api/transcriptions", body=AUDIO)  # takes the only slot
     code, out, err = run(capsys, "transcribe", str(path))
-    assert code == 0 and "waiting" in err and out.count("alpha:") == 2
+    assert code == 0 and "queued (position 1)" in err and out.count("alpha:") == 2
     assert first["id"]
+
+
+def two_files(tmp_path):
+    paths = []
+    for name in ("one", "two"):
+        path = tmp_path / f"{name}.wav"
+        path.write_bytes(AUDIO)
+        paths.append(str(path))
+    return paths
+
+
+def test_several_sources_are_transcribed_in_turn_with_headers(served, tmp_path, capsys):
+    one, two = two_files(tmp_path)
+    code, out, err = run(capsys, "transcribe", one, two)
+    assert code == 0
+    assert out.count("alpha: 20.0s alpha: 20.0s") == 2
+    assert "=== one (" in out and "=== two (" in out and out.index("=== one") < out.index("=== two")
+    assert "[1/2] uploading one.wav" in err and "[2/2] done:" in err
+    assert sorted(s["title"] for s in served.client.get("/api/sessions").json()) == ["one", "two"]
+
+
+def test_several_sources_as_json_and_a_failure_in_the_middle(served, tmp_path, monkeypatch, capsys):
+    one, two = two_files(tmp_path)
+    fake_network(monkeypatch, {})  # the link below is dead
+    code, out, err = run(capsys, "transcribe", one, "https://example.com/dead.mp3", two, "--format", "json", "-q")
+    assert code == 7  # some failed, some did not
+    entries = json.loads(out)
+    assert [e["ok"] for e in entries] == [True, False, True]
+    assert entries[0]["title"] == "one" and entries[2]["title"] == "two" and len(entries[0]["segments"]) == 2
+    assert entries[1]["source"] == "https://example.com/dead.mp3" and entries[1]["error"]["exit_code"] == 4
+
+
+def test_several_sources_into_a_directory(served, tmp_path, capsys):
+    one, two = two_files(tmp_path)
+    out_dir = tmp_path / "out"
+    code, out, _ = run(capsys, "transcribe", one, two, "--out", str(out_dir), "--format", "srt", "-q")
+    assert code == 0
+    assert out.splitlines() == [str(out_dir / "01-one.srt"), str(out_dir / "02-two.srt")]
+    assert "00:00:01,000 --> 00:00:21,000" in (out_dir / "01-one.srt").read_text()
+
+
+def test_sources_can_come_from_a_file_with_comments(served, tmp_path, capsys):
+    one, two = two_files(tmp_path)
+    listing = tmp_path / "list.txt"
+    listing.write_text(f"# the queue\n{one}\n\n  {two}  \n")
+    code, out, _ = run(capsys, "transcribe", "--from", str(listing), "--format", "json", "-q")
+    assert code == 0 and [e["title"] for e in json.loads(out)] == ["one", "two"]
+
+
+def test_all_failing_returns_the_first_failure_and_a_bad_source_is_a_usage_error_up_front(served, tmp_path, monkeypatch, capsys):
+    bad = tmp_path / "bad.wav"
+    bad.write_bytes(b"not audio")
+    code, _, err = run(capsys, "transcribe", str(bad), str(bad), "-q")
+    assert code == 6 and err.count("cannot decode") == 2
+    before = served.client.get("/api/status").json()
+    code, _, err = run(capsys, "transcribe", two_files(tmp_path)[0], "nonsense.mp3", "-q")
+    assert code == 2 and "nonsense.mp3" in err
+    assert served.client.get("/api/sessions").json() == []  # nothing was uploaded first
+    assert run(capsys, "transcribe", "-q")[0] == 2
+    assert before["transcriptions"]["running"] == 0
 
 
 def test_no_active_model_is_reported_up_front(served, tmp_path, monkeypatch, capsys):
