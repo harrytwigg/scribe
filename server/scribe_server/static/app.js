@@ -415,48 +415,39 @@ function refreshLists() {
   if (currentTab === 'history') refreshHistory().catch(() => {});
 }
 
-// ---- transcribe: an uploaded file or a podcast link, as a background job ---------------------
+// ---- transcribe: uploaded files and podcast links, queued as background jobs ----------------
 
-const TX_JOB = 'scribe-tx-job';
+const TX_JOBS = 'scribe-tx-jobs';
 const remembered = {
-  get() { try { return localStorage.getItem(TX_JOB); } catch { return null; } },
-  set(id) { try { id ? localStorage.setItem(TX_JOB, id) : localStorage.removeItem(TX_JOB); } catch {} },
+  get() { try { return JSON.parse(localStorage.getItem(TX_JOBS) ?? '[]'); } catch { return []; } },
+  set(ids) { try { localStorage.setItem(TX_JOBS, JSON.stringify(ids)); } catch {} },
 };
-let txJob = null; // the job being followed: { id, timer }
+const ACTIVE = ['queued', 'fetching', 'decoding', 'transcribing'];
+const mb = (bytes) => (bytes / 1e6).toFixed(1);
 
-function txBusy(busy) {
-  $('#tx-go').disabled = busy;
-  $('#tx-cancel').hidden = !busy;
-  if (!busy) $('#tx-progress').hidden = true;
-}
+// Every item in the list: a file still being sent, a link being handed over, or a server job.
+// { key, label, id (server job), job (its last state), upload (XHR), pending, error, node, open }
+const txItems = [];
+let txTimer = null;
 
-function txStatus(text, progress = null) {
+function txMessage(text, isError = true) {
   $('#tx-status').textContent = text;
-  $('#tx-status').className = 'hint';
-  const bar = $('#tx-progress');
-  bar.hidden = progress == null;
-  if (progress != null) bar.value = progress;
-}
-
-function txFail(message, quiet = false) {
-  txBusy(false);
-  $('#tx-status').textContent = message;
-  $('#tx-status').className = quiet ? 'hint' : 'error';
+  $('#tx-status').className = isError ? 'error' : 'hint';
 }
 
 /** POST the file itself as the body, with upload progress (fetch cannot report it). */
-let uploading = null; // the upload in flight, for Cancel
-
-function uploadFile(file, params, onProgress) {
+function uploadFile(item, file, params) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    uploading = request;
-    request.onabort = () => reject(Object.assign(new Error('Cancelled.'), { cancelled: true }));
+    item.upload = request;
     request.open('POST', `/api/transcriptions?${new URLSearchParams(params)}`);
-    request.upload.onprogress = (event) => event.lengthComputable && onProgress(event.loaded / event.total);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) { item.uploaded = event.loaded / event.total; txRender(item); }
+    };
+    request.onabort = () => reject(Object.assign(new Error('Cancelled.'), { cancelled: true }));
     request.onerror = () => reject(new Error('The upload failed: the server could not be reached.'));
     request.onload = () => {
-      uploading = null;
+      item.upload = null;
       if (request.status === 401) { showLogin(); reject(new Unauthorised()); return; }
       let body = {};
       try { body = JSON.parse(request.responseText); } catch {}
@@ -467,100 +458,183 @@ function uploadFile(file, params, onProgress) {
   });
 }
 
-const STAGES = { queued: 'Waiting…', fetching: 'Fetching the episode…', decoding: 'Decoding the audio…', transcribing: 'Transcribing…' };
-
-function follow(id) {
-  stopFollowing();
-  remembered.set(id);
-  txBusy(true);
-  let polling = false;
-  const tick = async () => {
-    if (polling) return; // the last poll is still out
-    polling = true;
-    try { await poll(); } finally { polling = false; }
-  };
-  const poll = async () => {
-    let job;
-    try { job = await api(`/api/transcriptions/${id}`); } catch (error) {
-      if (error instanceof Unauthorised) return;
-      stopFollowing();
-      remembered.set(null);
-      txFail(error.status === 404 ? 'That transcription is no longer on the server (it may have finished long ago: look in History).' : error.message);
-      return;
-    }
-    if (txJob?.id !== id) return;
-    if (job.status in STAGES) {
-      const what = job.episode ? ` ${job.episode.show ? `${job.episode.show}: ` : ''}${job.episode.title}` : '';
-      txStatus(`${STAGES[job.status]}${job.status === 'fetching' ? what : ''}`, job.status === 'transcribing' ? job.progress : null);
-      return;
-    }
-    stopFollowing();
-    remembered.set(null);
-    if (job.status === 'done') { txBusy(false); txStatus(''); await showTranscript(job); }
-    else if (job.status === 'cancelled') txFail('Cancelled.', true);
-    else txFail(job.error ?? 'The transcription failed.');
-  };
-  txJob = { id, timer: setInterval(tick, 1500) };
-  tick();
+function txPersist() {
+  // Only what is still running: a reload picks those up; finished ones are in History.
+  remembered.set(txItems.filter((item) => item.id && txActive(item)).map((item) => item.id));
 }
 
-function stopFollowing() {
-  if (txJob) clearInterval(txJob.timer);
-  txJob = null;
+function txState(item) {
+  const job = item.job;
+  if (item.error) return { text: item.error, bar: null, cls: item.cancelled ? '' : 'error' };
+  if (item.upload || item.pending) {
+    return item.upload && item.uploaded != null
+      ? { text: `Uploading… ${Math.round(item.uploaded * 100)}%`, bar: item.uploaded }
+      : { text: item.pending ? 'Waiting to be sent…' : 'Sending…', bar: null };
+  }
+  if (!job) return { text: 'Starting…', bar: null };
+  if (job.status === 'queued') return { text: `Queued, ${job.queue_position === 1 ? 'next up' : `${job.queue_position - 1} ahead`}`, bar: 0 };
+  if (job.status === 'fetching') {
+    const d = job.download;
+    if (d && d.total) return { text: `Downloading ${mb(d.done)} of ${mb(d.total)} MB`, bar: job.progress };
+    return { text: d && d.done ? `Downloading ${mb(d.done)} MB` : 'Looking up the episode…', bar: null };
+  }
+  if (job.status === 'decoding') return { text: 'Decoding the audio…', bar: job.progress };
+  if (job.status === 'transcribing') {
+    return job.step
+      ? { text: `${job.step[0].toUpperCase()}${job.step.slice(1)}…`, bar: null }
+      : { text: `Transcribing ${Math.round(job.stage_progress * 100)}%`, bar: job.progress };
+  }
+  if (job.status === 'done') return { text: `Done: ${(job.result.duration / 60).toFixed(1)} min of audio in ${(job.result.asr_ms / 1000).toFixed(1)} s`, bar: 1 };
+  if (job.status === 'cancelled') return { text: 'Cancelled.', bar: null };
+  return { text: job.error ?? 'The transcription failed.', bar: null, cls: 'error' };
 }
 
-async function showTranscript(job) {
+const txActive = (item) => !item.error && (item.pending || item.upload || !item.job || ACTIVE.includes(item.job.status));
+
+function txRender(item) {
+  const { text, bar, cls } = txState(item);
+  const done = item.job?.status === 'done';
+  if (!item.node) {
+    item.node = el('li', { class: 'tx-item' });
+    $('#tx-queue').append(item.node);
+  }
+  const title = item.job?.episode || item.job?.status === 'done' ? item.job.title : item.label;
+  const progress = el('progress', { max: 1 });
+  if (bar != null) progress.value = bar;
+  item.node.replaceChildren(
+    el('div', { class: 'toolbar' },
+      el('strong', {}, title),
+      el('span', { class: `state ${cls ?? ''}` }, text),
+      done ? el('button', { type: 'button', onclick: () => txToggle(item) }, item.open ? 'Hide transcript' : 'Show transcript') : '',
+      txActive(item)
+        ? el('button', { type: 'button', onclick: () => txCancel(item) }, 'Cancel')
+        : el('button', { type: 'button', title: 'Remove from this list (a transcript stays in History)', onclick: () => txDismiss(item) }, 'Remove')),
+    txActive(item) ? progress : '',
+    item.view ?? '');
+  txSummary();
+}
+
+function txSummary() {
+  const waiting = txItems.filter(txActive).length;
+  $('#tx-summary').textContent = txItems.length ? `${txItems.length - waiting} of ${txItems.length} finished` : '';
+}
+
+async function txToggle(item) {
+  item.open = !item.open;
+  item.view = item.open ? await txTranscript(item.job) : null;
+  txRender(item);
+}
+
+async function txCancel(item) {
+  if (item.upload) item.upload.abort();
+  else if (item.pending) { item.error = 'Cancelled.'; item.cancelled = true; item.pending = false; txRender(item); }
+  else if (item.id) { try { await api(`/api/transcriptions/${item.id}`, { method: 'DELETE' }); } catch {} txPoll(); }
+}
+
+function txDismiss(item) {
+  txItems.splice(txItems.indexOf(item), 1);
+  item.node?.remove();
+  txPersist();
+  txSummary();
+}
+
+async function txTranscript(job) {
   const session = await api(`/api/sessions/${job.session_id}`);
   const r = job.result;
   const text = session.utterances.map((u) => u.text).join('\n');
   const copy = el('button', { type: 'button', onclick: async () => {
     try { await navigator.clipboard.writeText(r.text); copy.textContent = 'Copied'; } catch { copy.textContent = 'Copy failed'; }
   } }, 'Copy text');
-  $('#tx-result').replaceChildren(
+  return el('div', { class: 'tx-view' },
     el('div', { class: 'toolbar' },
-      el('h3', {}, session.title),
-      el('span', { class: 'state' }, `${(r.duration / 60).toFixed(1)} min of audio in ${(r.asr_ms / 1000).toFixed(1)} s · ${r.speakers} speaker${r.speakers === 1 ? '' : 's'}`),
+      el('span', { class: 'state' }, `${r.speakers} speaker${r.speakers === 1 ? '' : 's'}`),
       ...['md', 'srt', 'json'].map((f) => el('a', { href: `/api/sessions/${session.id}/export?format=${f}` }, f.toUpperCase())),
       copy,
       el('a', { href: `#history/${session.id}` }, 'Open in History')),
     r.note ? el('p', { class: 'hint' }, r.note) : '',
-    el('div', { id: 'tx-text', class: 'transcript' }, text ? session.utterances.map((u) => el('div', { class: 'line' },
+    el('div', { class: 'transcript tx-text' }, text ? session.utterances.map((u) => el('div', { class: 'line' },
       el('time', {}, clock(u.started_at - session.started_at)),
       el('span', { class: 'who', style: `--hue:${hue(u.speaker_id)}` }, u.speaker_name),
       el('p', { style: 'margin:0' }, u.text))) : el('p', { class: 'hint' }, '(no speech)')));
 }
 
+/** One poll of every job the server still works on. */
+let txPolling = false;
+async function txPoll() {
+  if (txPolling) return; // the last round is still out
+  txPolling = true;
+  try {
+    for (const item of txItems.filter((i) => i.id && !i.error && (!i.job || ACTIVE.includes(i.job.status)))) {
+      try { item.job = await api(`/api/transcriptions/${item.id}`); } catch (error) {
+        if (error instanceof Unauthorised) return;
+        item.error = error.status === 404 ? 'No longer on the server (look in History).' : error.message;
+      }
+      if (item.job && !ACTIVE.includes(item.job.status)) txPersist();
+      const solo = txItems.length === 1;
+      if (item.job?.status === 'done' && solo && item.open == null) { item.open = true; item.view = await txTranscript(item.job); }
+      txRender(item);
+    }
+  } finally { txPolling = false; }
+  if (!txItems.some((item) => item.id && !item.error && (!item.job || ACTIVE.includes(item.job.status)))) {
+    clearInterval(txTimer);
+    txTimer = null;
+  }
+}
+
+function txWatch() {
+  txPersist();
+  if (!txTimer) txTimer = setInterval(txPoll, 1500);
+  txPoll();
+}
+
+function txAdd(label) {
+  const item = { label, pending: true };
+  txItems.push(item);
+  txRender(item);
+  return item;
+}
+
 $('#tx-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const file = $('#tx-file').files[0];
-  const link = $('#tx-link').value.trim();
-  if (!file && !link) return txFail('Choose an audio file or paste a podcast link.');
-  if (file && link) return txFail('Use either a file or a link, not both.');
+  const files = [...$('#tx-file').files];
+  const links = $('#tx-links').value.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!files.length && !links.length) return txMessage('Choose audio files or paste podcast links (one per line).');
+  txMessage('', false);
   const diarize = $('#tx-speakers').checked;
-  $('#tx-file').value = ''; // sent below; the next run starts from an empty form
-  $('#tx-result').replaceChildren();
-  txBusy(true);
-  try {
-    let job;
-    if (file) {
-      txStatus('Uploading…', 0);
-      job = await uploadFile(file, { filename: file.name, diarize }, (done) => txStatus(`Uploading… ${Math.round(done * 100)}%`, done));
-    } else {
-      txStatus('Looking up the episode…');
-      job = await api('/api/transcriptions/link', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: link, diarize }),
-      });
+  $('#tx-file').value = ''; // sent below; the next batch starts from an empty form
+  $('#tx-links').value = '';
+  const started = [...links.map((link) => ({ link, item: txAdd(link) })), ...files.map((file) => ({ file, item: txAdd(file.name) }))];
+  // One after another: the server queues them and runs a few at a time.
+  for (const { link, file, item } of started) {
+    if (item.error) continue; // cancelled while waiting its turn
+    item.pending = false;
+    try {
+      const job = link
+        ? await api('/api/transcriptions/link', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: link, diarize }),
+        })
+        : await uploadFile(item, file, { filename: file.name, diarize });
+      item.id = job.id;
+      item.job = job;
+      txWatch();
+    } catch (error) {
+      if (error instanceof Unauthorised) return;
+      item.error = error.message;
+      item.cancelled = error.cancelled;
+      item.upload = null;
     }
-    follow(job.id);
-  } catch (error) { if (!(error instanceof Unauthorised)) txFail(error.message, error.cancelled); }
-  finally { uploading = null; }
+    txRender(item);
+  }
 });
 
-$('#tx-cancel').addEventListener('click', async () => {
-  if (uploading) { uploading.abort(); return; } // still sending the file
-  if (!txJob) return;
-  try { await api(`/api/transcriptions/${txJob.id}`, { method: 'DELETE' }); } catch {}
-});
+function txRestore() {
+  for (const id of remembered.get()) {
+    const item = { id, label: 'Transcription' };
+    txItems.push(item);
+    txRender(item);
+  }
+  if (txItems.length) txWatch();
+}
 
 // ---- try it ----------------------------------------------------------------------------------
 
@@ -649,7 +723,7 @@ function start() {
   if (started) return;
   started = true;
   refreshModels();
-  if (remembered.get()) follow(remembered.get()); // a transcription that was running when the page reloaded
+  txRestore(); // transcriptions that were running when the page reloaded
   // New and ended calls show up in the lists without a refresh.
   setInterval(refreshLists, POLL_MS);
 }

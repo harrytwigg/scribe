@@ -290,7 +290,7 @@ def test_gui_keeps_its_place(server, page):
 
 
 def test_gui_transcribe_tab(server, page):
-    """Upload a recording (with speakers separated) and paste a link, in the Transcribe tab."""
+    """Queue recordings and links in the Transcribe tab, and follow each one's progress."""
     page.goto(server)
     page.locator("#login, .card").first.wait_for()  # signed in already, or asked to
     if page.locator("#login").is_visible():
@@ -300,25 +300,22 @@ def test_gui_transcribe_tab(server, page):
     if "Active:" not in page.inner_text("#status"):
         use_model(page, "parakeet-tdt-0.6b-v2")
     page.get_by_role("tab", name="Transcribe").click()
+    page.evaluate("localStorage.removeItem('scribe-tx-jobs')")
 
-    # Nothing chosen, then both chosen: told what to do, nothing is sent.
+    # Nothing chosen: told what to do, nothing is sent.
     page.click("#tx-go")
-    assert "Choose an audio file or paste a podcast link" in page.inner_text("#tx-status")
-    page.locator("#tx-file").set_input_files(str(JFK))
-    page.fill("#tx-link", "https://example.com/a.mp3")
-    page.click("#tx-go")
-    assert "either a file or a link" in page.inner_text("#tx-status")
-    page.fill("#tx-link", "")
+    assert "Choose audio files or paste podcast links" in page.inner_text("#tx-status")
+    assert page.locator(".tx-item").count() == 0
 
-    # A recording with several voices, separated.
+    # A recording with several voices, separated; alone in the list, its transcript opens by itself.
     page.check("#tx-speakers")
     page.locator("#tx-file").set_input_files(str(CONVERSATION))
     page.click("#tx-go")
-    page.locator("#tx-text .line").first.wait_for(timeout=180_000)
-    result = page.inner_text("#tx-result")
-    assert "Speaker 2" in result and "Timaeus" in result
-    assert page.locator("#tx-result a", has_text="SRT").get_attribute("href").endswith("format=srt")
-    assert not page.locator("#tx-progress").is_visible()
+    page.locator(".tx-item").first.wait_for()
+    page.locator(".tx-item .tx-text .line").first.wait_for(timeout=180_000)
+    result = page.inner_text(".tx-item")
+    assert "Speaker 2" in result and "Timaeus" in result and "Done:" in result
+    assert page.locator(".tx-item a", has_text="SRT").get_attribute("href").endswith("format=srt")
     shot(page, "07-transcribe-upload")
 
     # The transcript is in History, where it can be renamed and exported.
@@ -326,10 +323,25 @@ def test_gui_transcribe_tab(server, page):
     page.locator("#history-view .line").first.wait_for(timeout=15_000)
     assert "Timaeus" in page.inner_text("#history-view")
 
-    # A link the server may not fetch (it is not a public address) fails with the reason.
+    # A queue: two files and a link the server may not fetch (not a public address), at once.
     page.get_by_role("tab", name="Transcribe").click()
-    page.fill("#tx-link", "http://127.0.0.1:9/episode.mp3")
+    page.locator(".tx-item").first.get_by_role("button", name="Remove").click()
+    page.uncheck("#tx-speakers")
+    page.fill("#tx-links", "http://127.0.0.1:9/episode.mp3")
+    page.locator("#tx-file").set_input_files([str(JFK), str(JFK)])
     page.click("#tx-go")
-    page.locator("#tx-status.error").wait_for(timeout=30_000)
-    assert "not a public address" in page.inner_text("#tx-status")
-    shot(page, "08-transcribe-link-refused")
+    assert page.locator(".tx-item").count() == 3
+    # progress is per item: the files show a bar while they wait or run
+    assert page.locator(".tx-item progress").count() >= 1
+    page.locator(".tx-item .state.error", has_text="not a public address").wait_for(timeout=60_000)
+    page.get_by_text("3 of 3 finished").wait_for(timeout=60_000)
+    shot(page, "08-transcribe-queue")
+    done = page.locator(".tx-item", has_text="Done:")
+    assert done.count() >= 2
+    done.first.get_by_role("button", name="Show transcript").click()
+    page.locator(".tx-item .tx-text .line").first.wait_for()
+    assert "ask not what your country" in page.inner_text(".tx-item .tx-text").lower()
+    # A finished item can be removed from the list (its transcript stays in History).
+    before = page.locator(".tx-item").count()
+    page.locator(".tx-item").first.get_by_role("button", name="Remove").click()
+    assert page.locator(".tx-item").count() == before - 1

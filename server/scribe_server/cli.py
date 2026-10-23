@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import podcast
@@ -62,9 +63,9 @@ class CliError(Exception):
         self.code, self.kind, self.http_status, self.retry_after = code, kind, http_status, retry_after
 
 
-def say(message: str, quiet: bool = False) -> None:
+def say(message: str, quiet: bool = False, tag: str = "") -> None:
     if not quiet:
-        print(f"scribe: {message}", file=sys.stderr, flush=True)
+        print(f"scribe: {tag}{message}", file=sys.stderr, flush=True)
 
 
 # -- settings ----------------------------------------------------------------------------------
@@ -153,39 +154,39 @@ def describe(episode: podcast.Episode) -> str:
     return f"{text} ({int(episode.duration_s // 60)} min)" if episode.duration_s else text
 
 
-def resolve_source(source: str, nth: int, quiet: bool) -> podcast.Episode:
+def resolve_source(source: str, nth: int, quiet: bool, tag: str = "") -> podcast.Episode:
     try:
         episode = podcast.resolve(podcast.Fetcher(), source, nth)
     except podcast.FetchError as error:
         raise CliError(str(error), NETWORK, "network") from error
     except podcast.PodcastError as error:
         raise CliError(str(error), NOT_FOUND, "not_found") from error
-    say(f"found {describe(episode)} [{episode.source}] {episode.audio_url}", quiet)
+    say(f"found {describe(episode)} [{episode.source}] {episode.audio_url}", quiet, tag)
     match = episode.match
     if match and (match["date"] is False or match["duration"] is False or (match["date"] is None and match["duration"] is None)):
         # Always shown, even with -q: it is the one case where the audio may not be the episode asked for.
         print(
-            f"scribe: warning: weak match for {describe(episode)}: title {match['title']}, date "
+            f"scribe: {tag}warning: weak match for {describe(episode)}: title {match['title']}, date "
             f"{match['date']}, duration {match['duration']}; check it is the episode you wanted "
             f"(`scribe resolve` shows it; pass the feed URL with --episode N to be sure)", file=sys.stderr,
         )
     return episode
 
 
-def fetch_audio(episode: podcast.Episode, directory: Path, quiet: bool) -> Path:
+def fetch_audio(episode: podcast.Episode, directory: Path, quiet: bool, tag: str = "") -> Path:
     last = [0.0]
 
     def progress(done: int, total: int | None) -> None:
         if time.monotonic() - last[0] >= 5:
             last[0] = time.monotonic()
-            say(f"downloading {done / 1e6:.1f}" + (f" of {total / 1e6:.1f} MB" if total else " MB"), quiet)
+            say(f"downloading {done / 1e6:.1f}" + (f" of {total / 1e6:.1f} MB ({done * 100 // total}%)" if total else " MB"), quiet, tag)
 
     name = podcast.safe_name(f"{episode.show or ''} {episode.title}")
     try:
         path = podcast.download(podcast.Fetcher(timeout=60), episode.audio_url, directory, name, progress)
     except podcast.PodcastError as error:
         raise CliError(str(error), NETWORK, "network") from error
-    say(f"downloaded {path.name} ({path.stat().st_size / 1e6:.1f} MB)", quiet)
+    say(f"downloaded {path.name} ({path.stat().st_size / 1e6:.1f} MB)", quiet, tag)
     return path
 
 
@@ -201,15 +202,10 @@ def check_server(server: Server) -> None:
         raise CliError(f"the scribe server at {server.url} has no active model; pick one in its GUI", SERVER, "no_model")
 
 
-def start_job(server: Server, path: Path, query: str, quiet: bool) -> dict:
+def start_job(server: Server, path: Path, query: str, quiet: bool, tag: str = "") -> dict:
+    """Upload the audio; the server queues it behind any running transcriptions."""
     waited, dropped = 0.0, 0
     while True:
-        busy = server.call("GET", "/api/status").get("transcriptions", {})
-        if busy.get("running", 0) >= busy.get("max", 1 << 30) and waited <= 3600:
-            say(f"the server is running {busy['running']} transcriptions already; waiting", quiet)
-            time.sleep(15)
-            waited += 15
-            continue
         try:
             with path.open("rb") as audio:
                 return server.call(
@@ -217,45 +213,89 @@ def start_job(server: Server, path: Path, query: str, quiet: bool) -> dict:
                     headers={"Content-Type": "application/octet-stream", "Content-Length": str(path.stat().st_size)},
                 )
         except CliError as error:
-            retry = error.http_status == 429
+            retry = error.http_status == 429  # the server's queue is full
             if error.kind == "unreachable":
-                # A server that refuses a large upload (busy: 429) closes the connection while it
-                # is still being sent, which arrives here as a reset. Say why if the server
-                # answers now (wrong token, no model); otherwise it was busy: try again.
+                # A server that refuses a large upload closes the connection while it is still
+                # being sent, which arrives here as a reset. Say why if the server answers now
+                # (wrong token, no model); otherwise try again.
                 check_server(server)
                 dropped += 1
                 retry = dropped <= 5
             if not retry or waited > 3600:
                 raise
-            say("the server refused the upload (busy); waiting", quiet)
+            say("the server refused the upload (its queue is full); waiting", quiet, tag)
             time.sleep(error.retry_after or 15)
             waited += error.retry_after or 15
 
 
-def transcribe_file(server: Server, path: Path, title: str, speakers: bool, quiet: bool) -> dict:
-    query = urllib.parse.urlencode({"filename": path.name, "title": title, "diarize": "true" if speakers else "false"})
-    say(f"uploading {path.name} to {server.url}", quiet)
-    job = start_job(server, path, query, quiet)
-    stage, shown = None, -1.0
+@dataclass
+class Item:
+    """One source on its way through: found, downloaded, uploaded, queued, transcribed."""
+
+    index: int
+    source: str
+    episode: podcast.Episode | None = None
+    title: str = ""
+    job: dict | None = None  # the server's latest view of the job
+    error: CliError | None = None
+    shown: str = ""  # what was last said about it
+    tag: str = ""
+
+
+def prepare(server: Server, item: Item, args, scratch: Path, quiet: bool) -> None:
+    """Find, download and upload one source; leaves its job running (or queued) on the server."""
+    local = Path(item.source).expanduser()
+    if local.is_file():
+        audio, item.title, delete = local, local.stem, False
+    else:
+        item.episode = resolve_source(item.source, args.episode, quiet, item.tag)
+        keep = Path(args.keep_audio) if args.keep_audio else None
+        audio = fetch_audio(item.episode, keep or scratch, quiet, item.tag)
+        item.title = f"{item.episode.show}: {item.episode.title}" if item.episode.show else item.episode.title
+        delete = keep is None
+    query = urllib.parse.urlencode({"filename": audio.name, "title": item.title, "diarize": "true" if args.speakers else "false"})
+    say(f"uploading {audio.name} to {server.url}", quiet, item.tag)
+    item.job = start_job(server, audio, query, quiet, item.tag)
+    if delete:
+        audio.unlink(missing_ok=True)
+
+
+def progress_line(job: dict) -> str:
+    if job["status"] == "queued":
+        return f"queued (position {job['queue_position']})"
+    if job["status"] == "transcribing":
+        percent = int(job["stage_progress"] * 100) // 10 * 10
+        return job["step"] or ("transcribing" + (f" {percent}%" if percent else ""))
+    return job["status"]
+
+
+def await_jobs(server: Server, items: list[Item], quiet: bool) -> None:
+    """Poll every started job until all have finished; fills in `item.job` or `item.error`."""
     try:
         while True:
-            job = server.call("GET", f"/api/transcriptions/{job['id']}")
-            if job["status"] not in ("queued", "fetching", "decoding", "transcribing"):
-                break
-            percent = int(job["progress"] * 100) // 10 * 10
-            if job["status"] != stage or (job["status"] == "transcribing" and percent != shown):
-                stage, shown = job["status"], percent
-                say(job["status"] + (f" {percent}%" if job["status"] == "transcribing" and percent else ""), quiet)
-            time.sleep(1.5)
+            waiting = [i for i in items if i.job and not i.error and i.job["status"] in ("queued", "fetching", "decoding", "transcribing")]
+            if not waiting:
+                return
+            for item in waiting:
+                item.job = server.call("GET", f"/api/transcriptions/{item.job['id']}")
+                line = progress_line(item.job)
+                if item.job["status"] in ("queued", "fetching", "decoding", "transcribing") and line != item.shown:
+                    item.shown = line
+                    say(line, quiet, item.tag)
+                elif item.job["status"] not in ("queued", "fetching", "decoding", "transcribing") and item.job["status"] != "done":
+                    item.error = CliError(
+                        f"transcription {item.job['status']}: {item.job.get('error')}", FAILED, "transcription_failed"
+                    )
+            if any(i.job and i.job["status"] in ("queued", "fetching", "decoding", "transcribing") for i in waiting):
+                time.sleep(1.5)
     except KeyboardInterrupt:
-        try:
-            server.call("DELETE", f"/api/transcriptions/{job['id']}")
-        except CliError:
-            pass
+        for item in items:
+            if item.job and item.job["status"] in ("queued", "fetching", "decoding", "transcribing"):
+                try:
+                    server.call("DELETE", f"/api/transcriptions/{item.job['id']}")
+                except CliError:
+                    pass
         raise
-    if job["status"] != "done":
-        raise CliError(f"transcription {job['status']}: {job.get('error')}", FAILED, "transcription_failed")
-    return job
 
 
 def clock(seconds: float) -> str:
@@ -275,49 +315,129 @@ def render_text(result: dict, timestamps: bool, speakers: bool) -> str:
 
 # -- commands ----------------------------------------------------------------------------------
 
+EXTENSIONS = {"text": "txt", "json": "json", "srt": "srt", "md": "md"}
+PARTIAL = 7
+
+
+def read_sources(args) -> list[str]:
+    sources = list(args.sources)
+    if args.sources_from:
+        try:
+            text = sys.stdin.read() if args.sources_from == "-" else Path(args.sources_from).expanduser().read_text()
+        except OSError as error:
+            raise CliError(f"cannot read {args.sources_from}: {error}", USAGE, "usage") from error
+        sources += [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not sources:
+        raise CliError("give at least one SOURCE (a link or an audio file), or --from FILE", USAGE, "usage")
+    for source in sources:
+        if not Path(source).expanduser().is_file() and not looks_like_link(source):
+            raise CliError(f"{source!r} is neither a file that exists nor a link", USAGE, "usage")
+    return sources
+
+
+def render(server: Server, item: Item, args) -> str:
+    """The finished item as the requested format."""
+    result, session_id = item.job["result"], item.job["session_id"]
+    if args.format in ("srt", "md"):
+        return server.call("GET", f"/api/sessions/{session_id}/export?format={args.format}", raw=True).decode()
+    if args.format == "json":
+        return json.dumps(json_result(server, item, args), indent=2, ensure_ascii=False)
+    return render_text(result, args.timestamps, args.speakers)
+
+
+def json_result(server: Server, item: Item, args) -> dict:
+    result = item.job["result"]
+    return {
+        "title": item.job["title"], "source": item.source, "episode": item.episode.to_json() if item.episode else None,
+        "model": result["model"], "duration_s": result["duration"], "asr_ms": result["asr_ms"],
+        "speakers": result["speakers"], "text": result["text"], "segments": result["segments"],
+        "session_id": None if args.no_save else item.job["session_id"], "server": server.url,
+    }
+
+
+def error_json(error: CliError) -> dict:
+    return {"kind": error.kind, "message": str(error), "exit_code": error.code}
+
 
 def cmd_transcribe(args) -> int:
     quiet = args.quiet
-    local = Path(args.source).expanduser()
-    if not local.is_file() and not looks_like_link(args.source):
-        raise CliError(f"{args.source!r} is neither a file that exists nor a link", USAGE, "usage")
+    sources = read_sources(args)
+    many = len(sources) > 1
     server = Server(server_url(args.server), api_token(args.token))
     check_server(server)
-    episode = None
+    items = [Item(i, source, tag=f"[{i}/{len(sources)}] " if many else "") for i, source in enumerate(sources, 1)]
     with tempfile.TemporaryDirectory(prefix="scribe-") as scratch:
-        if local.is_file():
-            audio, title = local, local.stem
+        # Fetch and upload one after another: the server queues them and starts the next as soon as
+        # a slot is free, so the transcribing of one overlaps the downloading of the next.
+        for item in items:
+            try:
+                prepare(server, item, args, Path(scratch), quiet)
+            except CliError as error:
+                if not many:
+                    raise
+                item.error = error
+                print(f"scribe: {item.tag}error: {error}", file=sys.stderr)
+        known = {id(i) for i in items if i.error}
+        await_jobs(server, items, quiet)
+        for item in items:
+            if item.error and id(item) not in known and many:  # a job that failed on the server
+                print(f"scribe: {item.tag}error: {item.error}", file=sys.stderr)
+    if not many and items[0].error:
+        raise items[0].error
+    emit(server, items, args, many)
+    for item in items:
+        if item.job and item.job["status"] == "done":
+            if args.no_save:
+                server.call("DELETE", f"/api/sessions/{item.job['session_id']}")
+            say(
+                f"done: {item.job['result']['duration'] / 60:.1f} min of audio in {item.job['result']['asr_ms'] / 1000:.1f} s "
+                f"with {item.job['result']['model']}", quiet, item.tag,
+            )
+    failed = [i.error for i in items if i.error]
+    if not failed:
+        return OK
+    return failed[0].code if len(failed) == len(items) else PARTIAL
+
+
+def emit(server: Server, items: list[Item], args, many: bool) -> list[str]:
+    """Print or write each finished transcript; returns what was printed."""
+    done = [i for i in items if i.job and i.job["status"] == "done" and not i.error]
+    printed: list[str] = []
+    if args.format == "json" and many and not args.out:
+        # One JSON array, an entry per source in order, failures included.
+        entries = [
+            {"ok": True, **json_result(server, i, args)} if i in done else {"ok": False, "source": i.source, "error": error_json(i.error)}
+            for i in items
+        ]
+        print(json.dumps(entries, indent=2, ensure_ascii=False))
+        return printed
+    if args.out and many:
+        directory = Path(args.out).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        for item in done:
+            path = directory / f"{item.index:02d}-{podcast.safe_name(item.title, 'transcript')}.{EXTENSIONS[args.format]}"
+            path.write_text(render(server, item, args).rstrip("\n") + "\n")
+            print(path)
+            printed.append(str(path))
+        if args.format == "json":  # and the failures, so a script has the whole outcome in one place
+            index = directory / "index.json"
+            index.write_text(json.dumps([
+                {"ok": True, "source": i.source, "file": printed[done.index(i)]} if i in done else
+                {"ok": False, "source": i.source, "error": error_json(i.error)} for i in items], indent=2) + "\n")
+        return printed
+    for item in done:
+        output = render(server, item, args)
+        if args.out:  # one source
+            out = Path(args.out).expanduser()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(output.rstrip("\n") + "\n")
+            print(out)
         else:
-            episode = resolve_source(args.source, args.episode, quiet)
-            audio = fetch_audio(episode, Path(args.keep_audio) if args.keep_audio else Path(scratch), quiet)
-            title = f"{episode.show}: {episode.title}" if episode.show else episode.title
-        job = transcribe_file(server, audio, title, args.speakers, quiet)
-    result, session_id = job["result"], job["session_id"]
-    if args.format in ("srt", "md"):
-        output = server.call("GET", f"/api/sessions/{session_id}/export?format={args.format}", raw=True).decode()
-    elif args.format == "json":
-        output = json.dumps(
-            {
-                "title": job["title"], "source": args.source, "episode": episode.to_json() if episode else None,
-                "model": result["model"], "duration_s": result["duration"], "asr_ms": result["asr_ms"],
-                "speakers": result["speakers"], "text": result["text"], "segments": result["segments"],
-                "session_id": None if args.no_save else session_id, "server": server.url,
-            },
-            indent=2, ensure_ascii=False,
-        )
-    else:
-        output = render_text(result, args.timestamps, args.speakers)
-    if args.no_save:
-        server.call("DELETE", f"/api/sessions/{session_id}")
-    if args.out:
-        out = Path(args.out).expanduser()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(output.rstrip("\n") + "\n")
-        print(out)
-    else:
-        print(output)
-    say(f"done: {result['duration'] / 60:.1f} min of audio in {result['asr_ms'] / 1000:.1f} s with {result['model']}", quiet)
-    return OK
+            if many:
+                print(f"=== {item.title} ({item.source}) ===")
+            print(output)
+        printed.append(output)
+    return printed
 
 
 def cmd_resolve(args) -> int:
@@ -362,9 +482,10 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--episode", type=int, default=1, metavar="N", help="of a show or feed: the Nth newest episode (default 1, the newest)")
 
     t = commands.add_parser("transcribe", help="download (if a link) and transcribe", description=DESCRIPTION, epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
-    t.add_argument("source", metavar="SOURCE", help="a podcast link or an audio file")
+    t.add_argument("sources", metavar="SOURCE", nargs="*", help="a podcast link or an audio file; several are queued and run in turn")
+    t.add_argument("--from", dest="sources_from", metavar="FILE", help="also read SOURCEs from FILE, one per line ('-' is stdin; blank lines and # comments are skipped)")
     t.add_argument("--format", choices=["text", "json", "srt", "md"], default="text", help="text (default), json, srt or md")
-    t.add_argument("--out", metavar="FILE", help="write the transcript here and print the path, instead of stdout")
+    t.add_argument("--out", metavar="FILE", help="write the transcript here and print the path, instead of stdout; with several SOURCEs a directory, one file per source")
     t.add_argument("--speakers", action="store_true", help="separate speakers (Speaker 1, Speaker 2, ...)")
     t.add_argument("--timestamps", action="store_true", help="text format: start each line with its [hh:mm:ss] time")
     t.add_argument("--no-save", action="store_true", help="do not keep the transcript in the server's History")
