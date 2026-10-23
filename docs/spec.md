@@ -245,8 +245,11 @@ reachable while the box is off is H5.
 
 - Every request must carry the server's API token, **including from localhost**: harry-box also
   runs agent sessions, so loopback is not a trust boundary. `Authorization: Bearer` for the bot and
-  API clients. (`SCRIBE_TRUST_LOCALHOST=1` re-enables a loopback exemption for a single-user
-  machine; off by default.)
+  API clients. (`SCRIBE_TRUST_LOCALHOST=1` exempts requests from the machine itself, loopback or the
+  server's own listen addresses, unless they came through a proxy: the dashboard then opens without
+  signing in on that machine, and any process there can call the API without the token. Off by
+  default; harry-box turns it on, by Harry's decision, 2026-10-23, so its own browser needs no token.
+  Other tailnet machines and the Chrome extension still need it.)
 - The GUI signs in with the same token once and gets a session cookie (`HttpOnly`,
   `SameSite=Strict`). State-changing requests from the GUI must also carry a matching `Origin`
   header. This blocks CSRF from any other page open in the browser (a multipart POST needs no

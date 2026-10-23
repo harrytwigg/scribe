@@ -3,8 +3,12 @@
 - With a token configured, every request needs it, from this machine too: harry-box also runs
   agent sessions, so loopback is not a trust boundary. It comes as a bearer token (the bot, API
   clients), or as the session cookie the GUI gets by signing in with it.
-- `SCRIBE_TRUST_LOCALHOST=1` exempts loopback requests that did not come through a proxy (no
-  forwarding header: `tailscale serve` and Caddy both connect from loopback). Off by default.
+- `SCRIBE_TRUST_LOCALHOST=1` exempts requests from this machine that did not come through a proxy
+  (no forwarding header: `tailscale serve` and Caddy both connect from loopback): from loopback, or
+  from one of the addresses the server itself listens on (opening `http://<this machine's tailnet
+  name>:8787` on this machine arrives from its own tailnet address). The exemption covers the GUI
+  and every API call, so any process on the machine can use the server without the token. Off by
+  default.
 - Without a token, nothing is checked; the server then refuses to listen beyond loopback
   (`Settings.check`). That is for development only.
 - Any request carrying an `Origin` that is not this server's own is refused, which stops other web
@@ -25,10 +29,21 @@ PROXY_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip", "tailscale-user-lo
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+def _normal(address: str) -> str:
+    try:
+        return str(ipaddress.ip_address(address))
+    except ValueError:
+        return address
+
+
 class Auth:
-    def __init__(self, token: str | None, trust_localhost: bool = False, extension_origins: tuple[str, ...] = ()):
+    def __init__(
+        self, token: str | None, trust_localhost: bool = False, extension_origins: tuple[str, ...] = (),
+        own_addresses: tuple[str, ...] = (),
+    ):
         self._token = token
         self._trust_localhost = trust_localhost
+        self._own_addresses = frozenset(_normal(a) for a in own_addresses)
         self._extension_origins = frozenset(extension_origins)
         self._sessions: set[str] = set()
 
@@ -48,13 +63,15 @@ class Auth:
         if session:
             self._sessions.discard(session)
 
-    @staticmethod
-    def is_local(request: Request) -> bool:
+    def is_local(self, request: Request) -> bool:
+        """From this machine: loopback, or one of the addresses this server listens on (the
+        source address of a connection a machine makes to its own tailnet address). A client
+        cannot claim either from elsewhere: it is the connection's own source address."""
         if any(header in request.headers for header in PROXY_HEADERS):
             return False
         host = request.client.host if request.client else ""
         try:
-            return ipaddress.ip_address(host).is_loopback
+            return ipaddress.ip_address(host).is_loopback or _normal(host) in self._own_addresses
         except ValueError:
             return host == "testclient"  # Starlette's TestClient; local in tests
 

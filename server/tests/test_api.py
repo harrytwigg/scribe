@@ -168,6 +168,31 @@ def test_trust_localhost_is_opt_in(tmp_path):
     h.worker.stop()
 
 
+def test_trust_localhost_covers_the_machines_own_addresses(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from scribe_server.app import create_app
+    from scribe_server.auth import Auth
+
+    from .conftest import Harness
+
+    h = Harness(tmp_path)
+    h.services.auth = Auth(TOKEN, trust_localhost=True, own_addresses=("127.0.0.1", "100.76.208.67"))
+    app = create_app(h.services)
+
+    def get(source: str, **headers):
+        return TestClient(app, client=(source, 50000)).get("/api/models", headers=headers).status_code
+
+    assert get("127.0.0.1") == 200 and get("127.0.1.1") == 200 and get("::1") == 200  # loopback
+    assert get("100.76.208.67") == 200  # this machine, opened by its own tailnet address
+    assert get("100.76.208.99") == 401  # another tailnet machine
+    assert get("100.76.208.67", **{"X-Forwarded-For": "100.64.0.9"}) == 401  # proxied: not local
+    # off by default, even from the machine's own address
+    h.services.auth = Auth(TOKEN, own_addresses=("100.76.208.67",))
+    assert TestClient(create_app(h.services), client=("100.76.208.67", 1)).get("/api/models").status_code == 401
+    h.worker.stop()
+
+
 def test_no_token_means_no_checks(tmp_path):
     from .conftest import Harness
 
