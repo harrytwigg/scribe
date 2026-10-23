@@ -415,6 +415,7 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 | 2 | Public ingress via the tools host + tailnet policy | H3 |
 | 3 | Chrome extension for Meet / any browser call (4): built and tested in Chromium; the first real Meet call is the live test | Load it unpacked and try a call; H3 if off the tailnet |
 | 4 | Diarization for single-stream sources (built: 3.8; a live Meet call is its real test), LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
+| 5 | Podcast links and recordings: the `scribe` CLI, background transcription jobs (`/api/transcriptions`) saved to History, and the Transcribe tab (`docs/cli.md`) | Done |
 
 ## 8. Risks
 

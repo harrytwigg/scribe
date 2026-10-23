@@ -287,3 +287,49 @@ def test_gui_keeps_its_place(server, page):
     api.delete(f"/api/sessions/{b}").raise_for_status()
     page.locator("#live-transcript button.title", has_text="Nav B").wait_for(state="detached", timeout=15_000)
     api.post(f"/api/sessions/{a}/end").raise_for_status()
+
+
+def test_gui_transcribe_tab(server, page):
+    """Upload a recording (with speakers separated) and paste a link, in the Transcribe tab."""
+    page.goto(server)
+    page.locator("#login, .card").first.wait_for()  # signed in already, or asked to
+    if page.locator("#login").is_visible():
+        page.fill("#token", TOKEN)
+        page.click("#login-form button")
+    page.locator(".card").first.wait_for()
+    if "Active:" not in page.inner_text("#status"):
+        use_model(page, "parakeet-tdt-0.6b-v2")
+    page.get_by_role("tab", name="Transcribe").click()
+
+    # Nothing chosen, then both chosen: told what to do, nothing is sent.
+    page.click("#tx-go")
+    assert "Choose an audio file or paste a podcast link" in page.inner_text("#tx-status")
+    page.locator("#tx-file").set_input_files(str(JFK))
+    page.fill("#tx-link", "https://example.com/a.mp3")
+    page.click("#tx-go")
+    assert "either a file or a link" in page.inner_text("#tx-status")
+    page.fill("#tx-link", "")
+
+    # A recording with several voices, separated.
+    page.check("#tx-speakers")
+    page.locator("#tx-file").set_input_files(str(CONVERSATION))
+    page.click("#tx-go")
+    page.locator("#tx-text .line").first.wait_for(timeout=180_000)
+    result = page.inner_text("#tx-result")
+    assert "Speaker 2" in result and "Timaeus" in result
+    assert page.locator("#tx-result a", has_text="SRT").get_attribute("href").endswith("format=srt")
+    assert not page.locator("#tx-progress").is_visible()
+    shot(page, "07-transcribe-upload")
+
+    # The transcript is in History, where it can be renamed and exported.
+    page.get_by_role("link", name="Open in History").click()
+    page.locator("#history-view .line").first.wait_for(timeout=15_000)
+    assert "Timaeus" in page.inner_text("#history-view")
+
+    # A link the server may not fetch (it is not a public address) fails with the reason.
+    page.get_by_role("tab", name="Transcribe").click()
+    page.fill("#tx-link", "http://127.0.0.1:9/episode.mp3")
+    page.click("#tx-go")
+    page.locator("#tx-status.error").wait_for(timeout=30_000)
+    assert "not a public address" in page.inner_text("#tx-status")
+    shot(page, "08-transcribe-link-refused")

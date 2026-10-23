@@ -1,0 +1,135 @@
+# The `scribe` command
+
+Transcribe a podcast episode or an audio file with the scribe server, from a script or an agent.
+Non-interactive: arguments in, transcript on stdout, progress on stderr, a distinct exit code per
+kind of failure.
+
+```sh
+scribe transcribe https://open.spotify.com/episode/3tdrNundncNjVFHyNy9zXM   # prints the transcript
+scribe transcribe talk.m4a --speakers --format srt --out talk.srt           # writes talk.srt, prints its path
+scribe resolve https://open.spotify.com/episode/...                        # what would be fetched; no download
+```
+
+On harry-box it is installed by `deploy/install.sh` at `~/.local/bin/scribe`. From a checkout:
+`cd server && uv run scribe ...`. It needs the scribe server running (`systemctl --user status
+scribe-server`) with a model active (the default, Parakeet, is activated at start).
+
+## Commands
+
+| Command | Does |
+| --- | --- |
+| `scribe transcribe SOURCE` | Fetch the audio (if SOURCE is a link) and transcribe it. |
+| `scribe resolve LINK` | Print the episode a link names and its audio URL as JSON. `--list` lists the show's newest episodes. Downloads nothing. |
+| `scribe download LINK --out DIR` | Download the audio only; prints the file's path. |
+| `scribe status` | The server's state as JSON: active model, queue depth. |
+
+**SOURCE** (or LINK) is any of:
+
+| Source | Resolves to |
+| --- | --- |
+| `https://open.spotify.com/episode/<id>` (also `spotify:episode:<id>`, `spotify.link/...`, `/intl-xx/` forms) | That episode's public copy (see below) |
+| `https://open.spotify.com/show/<id>` | The show's newest episode, or `--episode N` for the Nth newest |
+| `https://podcasts.apple.com/<cc>/podcast/<slug>/id<id>` | The show's newest episode, or `--episode N`; with `?i=<id>`, that episode (among the ~300 newest Apple lists) |
+| An RSS feed URL, or a web page that links one | The feed's newest episode, or `--episode N` |
+| A direct audio URL (`.mp3`, `.m4a`, ...) | That file |
+| A local file | That file (anything libsndfile or FFmpeg reads: wav, flac, ogg, opus, mp3, m4a, aac, mp4) |
+
+### How a Spotify link is turned into audio
+
+Spotify's own audio is DRM-protected and not downloadable. scribe does what podcastmp3.com does
+instead: it reads the episode's title, show, release date and length from Spotify's public pages,
+finds the show's public RSS feed through Apple's podcast directory, matches the episode in the
+feed (title first; date within a couple of days and length within a few percent confirm it), and
+downloads the feed's `<enclosure>` audio. It refuses rather than guess: an episode whose title is the
+same but whose date and length both disagree (another week's "Weekly Roundup"), or that differs only
+in a number ("Part 1" / "Part 2", "Episode 12" / "13"), is not accepted unless the date or length agrees. This is the same recording most listeners hear, though
+Spotify and the feed may insert different ads.
+
+A **Spotify exclusive** (or any show not in Apple's directory with a public feed) has no public
+copy, so it cannot be fetched from its link: `scribe` exits with code 3 and says so. If you have
+the show's RSS URL, an mp3 URL or the audio file, pass that instead. Private or region-locked
+Spotify pages likewise fail.
+
+## Options of `transcribe`
+
+| Option | Meaning |
+| --- | --- |
+| `--format text\|json\|srt\|md` | Output format (default `text`). `json` is the one for programs. |
+| `--out FILE` | Write the transcript to FILE (parents created) and print the path, instead of printing the transcript. |
+| `--speakers` | Separate speakers: `Speaker 1`, `Speaker 2`, ... (slower; CPU diarization on the server). |
+| `--timestamps` | `text` format only: start each line with `[hh:mm:ss]`. |
+| `--episode N` | Of a show or feed: the Nth newest episode (default 1). |
+| `--no-save` | Do not keep the transcript in the server's History (default: kept, titled with the episode). |
+| `--keep-audio DIR` | Keep the downloaded audio in DIR (default: deleted after the upload). |
+| `-q` | No progress on stderr. |
+| `--server URL`, `--token T` | Server and API token. Defaults below. |
+
+### JSON output
+
+```json
+{
+  "title": "Up First from NPR: Democratic Surrogates Campaign, ...",
+  "source": "https://open.spotify.com/episode/3tdrNundncNjVFHyNy9zXM",
+  "episode": {"title": "...", "show": "Up First from NPR", "publisher": "NPR", "published": "2026-10-22T10:08:23+00:00",
+              "duration_s": 746.0, "audio_url": "https://...mp3", "feed_url": "https://feeds.npr.org/510318/podcast.xml",
+              "source": "spotify", "source_url": "https://open.spotify.com/episode/...",
+              "match": {"title": 1.0, "overall": 1.0, "date": true, "duration": true}},
+  "model": "parakeet-tdt-0.6b-v2", "duration_s": 874.9, "asr_ms": 11367, "speakers": 1,
+  "text": "full transcript ...",
+  "segments": [{"speaker": "Speaker 1", "start": 0.15, "end": 22.54, "text": "..."}],
+  "session_id": "b9ac0d3bdb97", "server": "http://127.0.0.1:8787"
+}
+```
+
+`episode` is `null` for a local file. For a Spotify link, `episode.match` says how sure the match is:
+`title` and `overall` are 0 to 1, `date` and `duration` say whether Spotify's and the feed's agreed
+(`null`: the feed did not say). An identical title alone is accepted only when nothing contradicts it;
+treat `date` and `duration` both `null` or a `title` below 1 as a weaker match worth a glance. `segments` are stretches of speech (up to 25 s each, or whole
+turns with `--speakers`) with start and end in seconds. `session_id` is the History entry
+(`null` with `--no-save`).
+
+On failure with `--format json`, stdout is `{"error": {"kind", "message", "exit_code"}}` (and
+the message is on stderr either way).
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Transcript produced |
+| 2 | Bad usage (SOURCE is neither an existing file nor a link) |
+| 3 | No audio for that link: not a public podcast, Spotify exclusive, no matching episode, unsupported link kind. Retrying will not help. |
+| 4 | Network or download failure (the link, the feed or the audio host). May be transient. |
+| 5 | The scribe server is unreachable, rejected the token, has no active model, or refused the upload (too large) |
+| 6 | The server failed to transcribe (undecodable audio, internal error) |
+| 130 | Interrupted (the running transcription is cancelled on the server) |
+
+## Configuration
+
+- **Server:** `--server`, else `$SCRIBE_URL`, else `SCRIBE_SERVER_URL` in `~/.config/scribe/env`,
+  else `http://127.0.0.1:8787`.
+- **Token:** `--token`, else `$SCRIBE_API_TOKEN`, else `SCRIBE_API_TOKEN` in that env file, else
+  the JSON secrets file named by `$SCRIBE_SECRETS_FILE` (or that env file's `SCRIBE_SECRETS_FILE`).
+  On harry-box the env file already points at the instance's secrets, so `scribe` works with no setup.
+- `$SCRIBE_ENV_FILE` overrides the env file's path.
+
+## Limits and behaviour worth knowing
+
+- Audio is uploaded to the server (one request, up to 512 MB; streamed to a temporary file there and
+  deleted once decoded) and transcribed as a background job; the CLI polls it. The server runs at most
+  2 transcriptions at once; `scribe` waits and retries while it is busy. A 15-minute episode takes about 15 s with Parakeet on the GPU. A long episode
+  yields to live calls: its speech is transcribed chunk by chunk through the same queue.
+- `--speakers` on a long recording holds the GPU for that recording's whole transcription in one
+  piece (a live call waits for it); prefer it for recordings of an hour or less.
+- Transcripts are kept in History (the GUI's History tab, with Markdown/SRT/JSON export) unless
+  `--no-save`. Audio is never kept on the server.
+- Text is English-only with the default model (Parakeet v2); pick another model in the GUI for other
+  languages (it applies to the CLI too, since the server has one active model).
+
+## The same thing in the browser
+
+The dashboard's **Transcribe** tab takes an uploaded audio file or a pasted podcast link (resolved
+by the server the same way, public addresses only) and shows the transcript with exports; it is
+saved in History. The server API behind both: `POST /api/transcriptions` (body = the audio file;
+`?filename=&title=&diarize=`), `POST /api/transcriptions/link` (`{"url", "diarize", "episode"}`),
+`GET /api/transcriptions/{id}` (poll: `status`, `progress`, `error`, `result`, `session_id`),
+`DELETE /api/transcriptions/{id}` (cancel). Same token as the rest of the API.

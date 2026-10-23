@@ -675,6 +675,7 @@ name = "scribe-server"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "av" },
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "huggingface-hub" },
@@ -699,6 +700,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", specifier = ">=19.0.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "faster-whisper", specifier = "==1.2.1" },
     { name = "huggingface-hub", specifier = ">=0.30" },

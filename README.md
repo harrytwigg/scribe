@@ -8,6 +8,7 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 - `server/`: Python ASR server and GUI (FastAPI; faster-whisper and onnx-asr on CUDA).
 - `bot/`: Discord bot (discord.js, `@discordjs/voice` with DAVE).
 - `extension/`: Chrome extension for Meet and other browser calls (tab audio + mic, no bot).
+- `server/scribe_server/cli.py`, `podcast.py`: the `scribe` command and the podcast link resolver (`docs/cli.md`).
 - `deploy/`: systemd user units and the install script.
 - `docs/spec.md`: design, decisions, phases. `docs/research/`: the research behind it.
 
@@ -21,6 +22,21 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
    to rename them for that session.
 5. **Try it** transcribes a file with the active model, to compare models on the same clip. Tick
    **Separate speakers** to have a recording split into Speaker 1, 2, ...
+
+### Podcasts and recordings
+
+- **Transcribe** tab: upload an audio file, or paste a Spotify, Apple Podcasts, RSS or mp3 link. The
+  transcript appears with Markdown/SRT/JSON export and is kept in **History**.
+- **CLI** (for scripts and agents; `deploy/install.sh` puts it at `~/.local/bin/scribe`):
+
+  ```sh
+  scribe transcribe https://open.spotify.com/episode/<id>            # transcript on stdout
+  scribe transcribe talk.m4a --speakers --format json --out talk.json
+  ```
+
+  Spotify's own audio is DRM-protected, so a Spotify link is resolved to the show's public RSS copy
+  (like podcastmp3.com); a Spotify exclusive has none and fails with a clear message. See
+  [docs/cli.md](docs/cli.md) for sources, options, JSON output and exit codes.
 
 ### Google Meet (or any call in a browser tab)
 
@@ -42,7 +58,7 @@ transcribing: unlike the Discord bot, nothing in the call announces it.
 cd server && uv sync --reinstall-package onnxruntime-gpu   # Python 3.12, CUDA 12 wheels; the
                                   # reinstall repairs a venv that still had the CPU onnxruntime
                                   # wheel, which shares onnxruntime-gpu's directory
-uv run pytest                     # unit tests (fake engines, no GPU)
+uv run pytest                     # unit tests (fake engines, no GPU; the network is faked too)
 uv run pytest -m gpu -s           # every catalogue model on the GPU (downloads ~16 GB once)
 uv run playwright install chromium && uv run pytest -m gui -s   # the GUI in a browser
 
