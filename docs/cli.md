@@ -59,7 +59,8 @@ Spotify pages likewise fail.
 | `--format text\|json\|srt\|md` | Output format (default `text`). `json` is the one for programs. |
 | `--out FILE` | Write the transcript to FILE (parents created) and print the path, instead of printing the transcript. With several sources, a directory: `01-<title>.<ext>`, `02-...`, one path printed per file (and an `index.json` with `--format json`). |
 | `--from FILE` | Also read SOURCEs from FILE, one per line (`-` is stdin; blank lines and `#` comments are skipped). |
-| `--speakers` | Separate speakers: `Speaker 1`, `Speaker 2`, ... (slower; CPU diarization on the server). |
+| `--speakers` | Separate speakers: `Speaker 1`, `Speaker 2`, ... (slower; CPU diarization on the server). scribe counts the speakers itself and folds scraps (a few seconds of someone's voice on a bad line) into the real ones. |
+| `--num-speakers N` | Separate speakers, ending with at most `N` of them (1 to 20): the closest-sounding voices are merged until `N` remain, scraps are not folded below `N`, and if scribe found fewer it clusters again more finely first (that second pass roughly doubles the separation time). Fewer than `N` can still come out if the recording really has fewer distinct voices. Use it when you know how many people speak. Implies `--speakers`. |
 | `--timestamps` | `text` format only: start each line with `[hh:mm:ss]`. |
 | `--episode N` | Of a show or feed: the Nth newest episode (default 1). |
 | `--no-save` | Do not keep the transcript in the server's History (default: kept, titled with the episode). |
@@ -147,7 +148,7 @@ The dashboard's **Transcribe** tab takes uploaded audio files (several at once) 
 queue with its own progress bar covering the whole job (downloading a link, decoding, transcribing,
 or its place in the queue) and a Cancel button; a finished row shows the transcript with exports and is
 saved in History. The server API behind both: `POST /api/transcriptions` (body = the audio file;
-`?filename=&title=&diarize=`), `POST /api/transcriptions/link` (`{"url", "diarize", "episode"}`),
+`?filename=&title=&diarize=&speakers=`), `POST /api/transcriptions/link` (`{"url", "diarize", "speakers", "episode"}`; `speakers` is 1 to 20 and implies `diarize`),
 `GET /api/transcriptions/{id}` (poll: `status` of queued, fetching, decoding, transcribing, done, error or
 cancelled; `progress` 0 to 1 over the whole job, `stage_progress` of the transcribing, `download` {done, total}
 bytes for a link, `queue_position`, `step`, `error`, `result`, `session_id`),

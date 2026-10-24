@@ -28,7 +28,7 @@ class Models:
     def __init__(self, role=None):
         pass
 
-    def turns(self, audio, live, *rest):
+    def turns(self, audio, live, threshold=None):
         flag = int(audio[0])
         if flag == 1:
             ctypes.PyDLL(None).usleep(int(HOLD_S * 1e6))  # a C call that keeps the lock, as sherpa's do

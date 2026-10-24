@@ -66,8 +66,9 @@ label.check { display: inline-flex; gap: 6px; align-items: center; }
 .file { display: flex; gap: 8px; align-items: center; }
 .stack { display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
 .stack label { display: flex; flex-direction: column; gap: 4px; }
-.stack label.check, .stack label.file { flex-direction: row; }
+.stack label.check, .stack label.file { flex-direction: row; align-items: center; }
 .stack input[type="url"] { padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
+.stack input[type="number"] { width: 5.5em; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
 .stack .row button[type="button"] { background: var(--panel); color: var(--text); border-color: var(--line); }
 #tx-status { margin-top: 16px; }
 .steps { max-width: 640px; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }

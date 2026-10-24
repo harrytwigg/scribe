@@ -58,6 +58,7 @@
         <p class="hint">Spotify's own audio is protected, so a Spotify link is fetched from the show's public RSS feed; a Spotify exclusive has none and cannot be transcribed from its link.</p>
         <div class="row">
           <label class="check"><input id="tx-speakers" type="checkbox"> Separate speakers</label>
+          <label class="check">How many? <input id="tx-count" type="number" min="1" max="20" placeholder="detect" title="If you know how many people speak, say so: scribe ends with at most that many speakers"></label>
           <button id="tx-go" type="submit">Transcribe</button>
         </div>
       </form>

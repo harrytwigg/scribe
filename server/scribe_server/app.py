@@ -17,11 +17,11 @@ from pathlib import Path
 
 import numpy as np
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import exports, podcast
 from .audio import RATE, AudioError, Vad, decode, speech_chunks, speech_spans
@@ -33,6 +33,7 @@ from .worker import GpuWorker, QueueFull
 
 log = logging.getLogger("scribe.app")
 STATIC = Path(__file__).parent / "static"
+MAX_SPEAKERS = 20  # the most speakers a caller may ask for
 # The Chrome extension, next to server/ in a checkout and in the deployed copy (deploy/install.sh).
 EXTENSION = Path(__file__).resolve().parents[2] / "extension"
 
@@ -478,13 +479,16 @@ def create_app(services: Services) -> FastAPI:
             return {"text": result.text, "model": result.model_id, "duration": result.duration_s, "asr_ms": result.asr_ms}
         return {"text": result.text}
 
-    async def diarized_segments(audio: np.ndarray, diarizer) -> dict:
+    async def diarized_segments(audio: np.ndarray, diarizer, speakers: int | None = None) -> dict:
         """Who spoke when, with the text of each turn: `segments`, `text`, `model`, `duration`,
         `asr_ms` and `speakers`. Raises HTTPException when the GPU queue is full."""
         started = time.monotonic()
         cancel = threading.Event()
         try:
-            turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio, cancel=cancel))
+            turns = await on_worker(
+                cpu("upload_worker"),
+                lambda: diarizer.whole(audio, speakers, cancel),
+            )
         except asyncio.CancelledError:
             cancel.set()  # a cancelled job stops its work in the separator, not only waiting for it
             raise
@@ -634,7 +638,7 @@ def create_app(services: Services) -> FastAPI:
         s.store.end_session(session["id"])
         return session["id"]
 
-    async def run_job(job: Job, source, diarize: bool) -> None:
+    async def run_job(job: Job, source, diarize: bool, speakers: int | None = None) -> None:
         """`source` is an awaitable giving the path of the audio file in `job.work` (it may fetch it first)."""
         try:
             await wait_for_slot(job)
@@ -647,7 +651,7 @@ def create_app(services: Services) -> FastAPI:
             job.step = "separating speakers" if diarizer else None
             for attempt in range(60):  # a full queue is not the job's failure: wait for room
                 try:
-                    job.result = await (diarized_segments(audio, diarizer) if diarizer else plain_segments(audio, job))
+                    job.result = await (diarized_segments(audio, diarizer, speakers) if diarizer else plain_segments(audio, job))
                     break
                 except HTTPException as busy:
                     if busy.status_code != 503 or "Retry-After" not in (busy.headers or {}) or attempt == 59:
@@ -674,8 +678,8 @@ def create_app(services: Services) -> FastAPI:
             job.task = None
             write_open_sessions()
 
-    def start_job(job: Job, source, diarize: bool) -> dict:
-        job.task = asyncio.create_task(run_job(job, source, diarize))
+    def start_job(job: Job, source, diarize: bool, speakers: int | None = None) -> dict:
+        job.task = asyncio.create_task(run_job(job, source, diarize, speakers))
         return job.public(queue_position(job))
 
     def require_model() -> None:
@@ -683,9 +687,12 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(503, "no model is active; pick one in the GUI")
 
     @app.post("/api/transcriptions", dependencies=[Depends(guard)], status_code=202)
-    async def start_upload(request: Request, filename: str = "", title: str = "", diarize: bool = False) -> dict:
+    async def start_upload(
+        request: Request, filename: str = "", title: str = "", diarize: bool = False, speakers: int | None = Query(None, ge=1, le=MAX_SPEAKERS)
+    ) -> dict:
         """The request body is the audio file itself (any format `decode` reads). Returns the job
-        to poll at GET /api/transcriptions/{id}."""
+        to poll at GET /api/transcriptions/{id}. `speakers`, the number of people in it if known,
+        implies `diarize` and makes the speaker separation find exactly that many."""
         require_model()
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > s.max_upload_bytes:
@@ -709,11 +716,12 @@ def create_app(services: Services) -> FastAPI:
         async def source(_: Job) -> Path:
             return path
 
-        return start_job(job, source, diarize)
+        return start_job(job, source, diarize or speakers is not None, speakers)
 
     class LinkJob(BaseModel):
         url: str
         diarize: bool = False
+        speakers: int | None = Field(None, ge=1, le=MAX_SPEAKERS)  # people in it, if known; implies diarize
         episode: int = 1  # of a show or feed link: 1 is the newest
 
     @app.post("/api/transcriptions/link", dependencies=[Depends(guard)], status_code=202)
@@ -739,7 +747,7 @@ def create_app(services: Services) -> FastAPI:
 
             return await asyncio.to_thread(fetch)
 
-        return start_job(job, source, body.diarize)
+        return start_job(job, source, body.diarize or body.speakers is not None, body.speakers)
 
     @app.get("/api/transcriptions/{job_id}", dependencies=[Depends(guard)])
     def get_job(job_id: str) -> dict:

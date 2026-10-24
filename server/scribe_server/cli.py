@@ -253,7 +253,10 @@ def prepare(server: Server, item: Item, args, scratch: Path, quiet: bool) -> Non
         audio = fetch_audio(item.episode, keep or scratch, quiet, item.tag)
         item.title = f"{item.episode.show}: {item.episode.title}" if item.episode.show else item.episode.title
         delete = keep is None
-    query = urllib.parse.urlencode({"filename": audio.name, "title": item.title, "diarize": "true" if args.speakers else "false"})
+    fields = {"filename": audio.name, "title": item.title, "diarize": "true" if args.speakers else "false"}
+    if args.num_speakers:
+        fields["speakers"] = args.num_speakers
+    query = urllib.parse.urlencode(fields)
     say(f"uploading {audio.name} to {server.url}", quiet, item.tag)
     item.job = start_job(server, audio, query, quiet, item.tag)
     if delete:
@@ -361,6 +364,10 @@ def error_json(error: CliError) -> dict:
 
 def cmd_transcribe(args) -> int:
     quiet = args.quiet
+    if args.num_speakers is not None:
+        if not 1 <= args.num_speakers <= 20:
+            raise CliError("--num-speakers is between 1 and 20", USAGE, "usage")
+        args.speakers = True
     sources = read_sources(args)
     many = len(sources) > 1
     server = Server(server_url(args.server), api_token(args.token))
@@ -487,6 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--format", choices=["text", "json", "srt", "md"], default="text", help="text (default), json, srt or md")
     t.add_argument("--out", metavar="FILE", help="write the transcript here and print the path, instead of stdout; with several SOURCEs a directory, one file per source")
     t.add_argument("--speakers", action="store_true", help="separate speakers (Speaker 1, Speaker 2, ...)")
+    t.add_argument("--num-speakers", type=int, metavar="N", help="separate speakers, and there are exactly N of them (use it when you know: it is more accurate than letting scribe count)")
     t.add_argument("--timestamps", action="store_true", help="text format: start each line with its [hh:mm:ss] time")
     t.add_argument("--no-save", action="store_true", help="do not keep the transcript in the server's History")
     t.add_argument("--keep-audio", metavar="DIR", help="keep the downloaded audio in DIR (default: deleted)")

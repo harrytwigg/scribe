@@ -300,6 +300,22 @@ utterance `diarize` (the extension does, for the tab channel only).
   Discord users included.
 - **Whole recordings.** "Try it" (and `/v1/audio/transcriptions` with `diarize=true`) diarizes an
   upload in one pass and returns `segments` with speakers.
+- **Scraps and a known count.** On a long recording the clusterer over-splits: one measured 44-minute
+  two-person podcast came out as 11 speakers, 93% of the speech in two of them and the rest scraps of
+  1 to 75 seconds (a voice over music, the same person on a different line). After clustering,
+  `absorb_scraps` measures each speaker's voice (TitaNet, on up to 45 s of their longest turns) and
+  folds a speaker with under 15 s of speech into the one they sound most like, and one with under 5%
+  of the speech into them if they also sound like them (the `MATCH` similarity), so a real third voice
+  that spoke for a minute stays; the same recording came out as 2. If the caller knows how many people
+  there are, `speakers` (API, 1 to 20; GUI "How many?"; CLI `--num-speakers`) merges the closest
+  voices (`merge_down`) until that many remain, after the scraps; if the first pass found fewer, it
+  clusters again more finely (threshold 0.5) first. sherpa's own fixed-count clustering is not used: on
+  a real podcast it gave one speaker of 680 s and one of seconds. Scraps are not folded below the
+  count, and the count is a maximum: a recording with fewer distinct voices ends with fewer. The finer
+  second pass roughly doubles the separation time. A speaker under 15 s of speech in a recording where
+  they hold under 5% is folded into the nearest voice whatever it sounds like (a guest's one-liner is
+  lost unless the count says to keep them). Live calls are not affected: their book already merges
+  speakers. Thresholds: `SCRIBE_DIARIZE_SCRAP_S`, `SCRIBE_DIARIZE_SCRAP_SHARE`.
 - **Its own processes.** sherpa-onnx holds Python's global lock for the whole of a call: measured,
   4 minutes of audio froze every thread of the server for 19 s, and an hour-long recording froze it
   (the dashboard, History, the Discord bot's posts) for minutes. So the models run in two child
