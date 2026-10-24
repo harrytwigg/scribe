@@ -517,9 +517,23 @@ def test_a_known_count_stops_the_folding_at_that_count():
     assert {t.label for t in absorb_scraps(turns, audio, voice, floor=2)} == {1, 2}
 
 
-def test_a_known_count_through_whole_never_ends_with_fewer_than_found_scraps_allow():
-    thresholds, speakers = whole_with([0, 1, 2], [0, 1, 2], 3)  # found 3, told 3
-    assert thresholds == [None] and speakers == [1, 2, 3]
+def test_a_known_count_through_whole_keeps_the_scrap_it_needs():
+    class Stubbed(Diarizer):
+        def __init__(self, turns):
+            self._whole_lock = threading.Lock()
+            self._given = turns
+
+        def _turns(self, audio, live=False, threshold=None, cancel=None):
+            return tidy(self._given)
+
+        def voice(self, audio, live=True, cancel=None):
+            return FakeDiarizer.voice(band_of(audio))
+
+    # Two big speakers and one real 10 s voice (3% of the speech): folded unless the count needs it.
+    audio, turns = conversation((300, 160, 0), (700, 160, 1), (500, 10, 2))
+    assert sorted({n for _, n in Stubbed(turns).whole(audio)}) == [1, 2]
+    assert sorted({n for _, n in Stubbed(turns).whole(audio, num_speakers=3)}) == [1, 2, 3]
+    assert sorted({n for _, n in Stubbed(turns).whole(audio, num_speakers=2)}) == [1, 2]
 
 
 def test_a_cancel_stops_the_folding_instead_of_placing_speakers_by_time():
