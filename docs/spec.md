@@ -308,7 +308,7 @@ utterance `diarize` (the extension does, for the tab channel only).
   of the speech into them if they also sound like them (the `MATCH` similarity), so a real third voice
   that spoke for a minute stays; the same recording came out as 2. If the caller knows how many people
   there are, `speakers` (API, 1 to 20; GUI "How many?"; CLI `--num-speakers`) makes the clusterer find
-  exactly that many instead, and nothing is folded. Live calls are not affected: their book already
+  that many remain instead (the closest voices are merged, after the scraps; if fewer were found it clusters again more finely first). Live calls are not affected: their book already
   merges speakers. Thresholds: `SCRIBE_DIARIZE_SCRAP_S`, `SCRIBE_DIARIZE_SCRAP_SHARE`.
 - **Its own processes.** sherpa-onnx holds Python's global lock for the whole of a call: measured,
   4 minutes of audio froze every thread of the server for 19 s, and an hour-long recording froze it

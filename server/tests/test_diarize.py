@@ -422,6 +422,11 @@ def test_a_longer_scrap_that_sounds_like_a_speaker_joins_them():
     assert labels == [1, 2]
 
 
+def test_a_short_recording_keeps_everyone_with_a_real_share():
+    # 12 s and 20 s of two people in a 32 s clip: each is far over 5%, whatever the seconds.
+    assert folded([(300, 20, 1), (700, 12, 2)])[0] == [1, 2]
+
+
 def test_one_speaker_or_two_balanced_speakers_are_left_alone():
     assert folded([(300, 60, 1)])[0] == [1]
     assert folded([(300, 60, 1), (700, 50, 2), (300, 50, 1)])[0] == [1, 2]
@@ -441,20 +446,59 @@ def test_a_scrap_whose_voice_cannot_be_measured_goes_to_the_speaker_beside_it():
     assert [t.label for t in out if abs(t.start - 202) < 0.01] == [2]  # between two stretches of 2
 
 
-def test_a_known_speaker_count_is_passed_on_and_skips_the_folding(monkeypatch):
-    seen = {}
+def merged(parts, count):
+    from scribe_server.diarize import merge_down
 
-    class Counted(Diarizer):
+    audio, turns = conversation(*parts)
+    out = merge_down(turns, audio, lambda clip: FakeDiarizer.voice(band_of(clip)), count)
+    return sorted({t.label for t in out}), out
+
+
+def test_merging_down_joins_the_voices_that_sound_alike():
+    parts = [(300, 100, 1), (700, 100, 2), (310, 30, 3), (710, 30, 4)]
+    labels, out = merged(parts, 2)
+    assert labels == [1, 2]
+    assert [t.label for t in out if abs(t.start - 202) < 0.01] == [1]  # the 310 Hz stretch is speaker 1 again
+    assert [t.label for t in out if abs(t.start - 233) < 0.01] == [2]
+    assert merged(parts, 1)[0] == [1]
+    assert merged(parts, 4)[0] == [1, 2, 3, 4]  # already no more than that
+    assert merged(parts, 9)[0] == [1, 2, 3, 4]
+
+
+def test_merging_down_places_a_voice_it_cannot_measure_by_time():
+    from scribe_server.diarize import merge_down
+
+    audio, turns = conversation((300, 100, 1), (700, 100, 2), (500, 0.3, 3))
+    out = merge_down(turns, audio, lambda clip: FakeDiarizer.voice(band_of(clip)), 2)
+    assert {t.label for t in out} == {1, 2}
+
+
+def whole_with(monkeypatch, first, second, count):
+    """`whole` over a stub clusterer: the labels found in a first pass and, at the finer threshold, a second."""
+    seen = {"thresholds": []}
+
+    class Stubbed(Diarizer):
         def __init__(self):
             self._whole_lock = threading.Lock()
 
-        def _turns(self, audio, live=False, num_speakers=None, cancel=None):
-            seen["n"] = num_speakers
-            return [Turn(0, 1, 0), Turn(1, 2, 1)]
+        def _turns(self, audio, live=False, threshold=None, cancel=None):
+            seen["thresholds"].append(threshold)
+            return tidy([Turn(i * 3.0, i * 3.0 + 2.5, label) for i, label in enumerate(second if threshold else first)])
 
-    monkeypatch.setattr("scribe_server.diarize.absorb_scraps", lambda turns, *a: [seen.setdefault("folded", True), turns][1])
-    d = Counted()
-    assert [n for _, n in d.whole(silence(2), num_speakers=2)] == [1, 2]
-    assert seen == {"n": 2}  # not folded
-    d.whole(silence(2))
-    assert seen["n"] is None and seen["folded"]
+        def voice(self, audio, live=True, cancel=None):
+            return FakeDiarizer.voice(band_of(audio))
+
+    audio = np.concatenate([np.concatenate([pitch(300 + 400 * (i % 2), 2.5), silence(0.5)]) for i in range(len(second))])
+    out = Stubbed().whole(audio, num_speakers=count)
+    return seen["thresholds"], sorted({n for _, n in out})
+
+
+def test_a_known_count_clusters_finer_only_if_fewer_speakers_were_found(monkeypatch):
+    from scribe_server.diarize import WHOLE_SPLIT_THRESHOLD
+
+    thresholds, speakers = whole_with(monkeypatch, [0, 0, 0, 0], [0, 1, 0, 1], 2)
+    assert thresholds == [None, WHOLE_SPLIT_THRESHOLD] and speakers == [1, 2]  # found 1, told 2: a finer pass
+    thresholds, _ = whole_with(monkeypatch, [0, 1, 0, 1], [0, 1, 2, 3], 2)
+    assert thresholds == [None]  # found 2, told 2: nothing more to do
+    thresholds, _ = whole_with(monkeypatch, [0, 1, 0, 1], [0, 1, 2, 3], None)
+    assert thresholds == [None]  # not told: as found
