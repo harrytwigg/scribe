@@ -16,6 +16,7 @@
       <button role="tab" data-tab="history">History</button>
       <button role="tab" data-tab="transcribe">Transcribe</button>
       <button role="tab" data-tab="try">Try it</button>
+      <button role="tab" data-tab="extension">Extension</button>
     </nav>
   </header>
 
@@ -74,6 +75,16 @@
       </div>
       <p id="try-mic-note" class="hint" hidden>The microphone needs HTTPS or localhost; upload a file instead.</p>
       <div id="try-result" class="result"></div>
+    </section>
+
+    <section id="tab-extension" class="tab" hidden>
+      <p class="hint">The Chrome extension transcribes a Google Meet call, or any browser tab, with no bot in the call. Chrome only keeps an extension loaded from a folder that stays where it is, so this is how to put it back, in each Chrome profile that should have it.</p>
+      <ol class="steps">
+        <li><a id="ext-download" href="/api/extension.zip" download>Download scribe-extension.zip</a> and unzip it somewhere permanent (not Downloads or a temporary folder).</li>
+        <li>In Chrome open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>, press <strong>Load unpacked</strong> and pick the unzipped folder.</li>
+        <li>Open the extension's <strong>Settings</strong>: set the server to <code id="ext-server"></code>, paste the API token, enter your name, and press <strong>Allow microphone</strong> once.</li>
+      </ol>
+      <p class="hint">Repeat for each Chrome profile. Moving or deleting the folder removes the extension from Chrome the next time it starts.</p>
     </section>
   </main>
   <script src="/static/app.js" type="module"></script>

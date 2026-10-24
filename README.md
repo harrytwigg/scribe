@@ -44,7 +44,10 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 ### Google Meet (or any call in a browser tab)
 
 1. In Chrome, open `chrome://extensions`, turn on **Developer mode**, **Load unpacked**, and pick
-   the `extension/` folder.
+   an `extension/` folder that will stay where it is: Chrome forgets an unpacked extension whose
+   folder is deleted or moved. On the machine that runs scribe, `deploy/install.sh` keeps a copy at
+   `~/.local/opt/scribe/extension`; from any other machine, the dashboard's **Extension** tab
+   downloads it as a zip to unzip somewhere permanent. Repeat for each Chrome profile.
 2. In the extension's **Settings**: the server (`http://harry-box:8787`), the API token and your
    name. Press **Allow microphone** once.
 3. In the Meet tab, click the scribe icon, then **Transcribe this tab**. Lines from the call

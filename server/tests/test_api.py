@@ -437,3 +437,18 @@ def test_names_are_one_plain_line(harness):
     assert c.post(f"/api/sessions/{sid}/speakers/u1", json={"name": " Ada\nLovelace\x00"}).json()["name"] == "Ada Lovelace"
     assert c.get(f"/api/sessions/{sid}").json()["speakers"] == {"u1": "Ada Lovelace"}
     assert c.patch(f"/api/sessions/{sid}", json={"title": "\n\x07"}).status_code == 400
+
+
+def test_the_extension_downloads_as_a_zip_to_load_unpacked(harness):
+    import io
+    import json
+    import zipfile
+
+    res = harness.client.get("/api/extension.zip")
+    assert res.status_code == 200 and res.headers["content-type"] == "application/zip"
+    names = zipfile.ZipFile(io.BytesIO(res.content)).namelist()
+    assert "manifest.json" in names and "src/background.js" in names  # a folder Chrome can load as it is
+    assert not any(n.startswith("test/") or n == "package.json" for n in names)
+    manifest = json.loads(zipfile.ZipFile(io.BytesIO(res.content)).read("manifest.json"))
+    assert manifest["manifest_version"] == 3 and manifest["key"]  # the key keeps the extension's id
+    assert harness.anonymous.get("/api/extension.zip").status_code == 401

@@ -13,11 +13,16 @@ Discord needs none of this: it delivers each user's audio separately.
 """
 
 import logging
+import multiprocessing
 import os
 import tarfile
 import threading
 import urllib.request
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
+from functools import partial
+from multiprocessing import shared_memory
 from pathlib import Path
 
 import numpy as np
@@ -149,32 +154,39 @@ def _fetch(url: str, dest: Path) -> None:
     partial.replace(dest)
 
 
-class Diarizer:
-    """sherpa-onnx diarization and speaker embeddings. Thread-safe: live calls (`turns`) and whole
-    recordings (`whole`) use separate models and locks, so a long upload never holds up a call."""
+def fetch_models(models_dir: Path) -> Path:
+    """Download the segmentation and embedding models on first use (~45 MB); returns their folder."""
+    folder = models_dir / "_diarization"
+    folder.mkdir(parents=True, exist_ok=True)
+    segmentation = folder / "pyannote-segmentation-3.0.onnx"
+    embedding = folder / "nemo_en_titanet_small.onnx"
+    if not segmentation.exists():
+        archive = folder / "segmentation.tar.bz2"
+        _fetch(SEGMENTATION_URL, archive)
+        with tarfile.open(archive) as tar:
+            member = next(m for m in tar.getmembers() if m.name.endswith("/model.onnx"))
+            source = tar.extractfile(member)
+            assert source is not None
+            partial = segmentation.with_suffix(".partial")
+            partial.write_bytes(source.read())
+            partial.replace(segmentation)
+        archive.unlink()
+    if not embedding.exists():
+        _fetch(EMBEDDING_URL, embedding)
+    return folder
+
+
+class Sherpa:
+    """The sherpa-onnx models and nothing else: raw turns and voice embeddings. Its calls hold
+    Python's global lock for as long as they run (a minute or more for a long recording), so the
+    server runs them in child processes (`Diarizer`, `isolated`), never next to the web server."""
 
     def __init__(self, models_dir: Path, threads: int = 8):
         import sherpa_onnx
 
-        folder = models_dir / "_diarization"
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = fetch_models(models_dir)
         segmentation = folder / "pyannote-segmentation-3.0.onnx"
         embedding = folder / "nemo_en_titanet_small.onnx"
-        if not segmentation.exists():
-            archive = folder / "segmentation.tar.bz2"
-            _fetch(SEGMENTATION_URL, archive)
-            with tarfile.open(archive) as tar:
-                member = next(m for m in tar.getmembers() if m.name.endswith("/model.onnx"))
-                source = tar.extractfile(member)
-                assert source is not None
-                partial = segmentation.with_suffix(".partial")
-                partial.write_bytes(source.read())
-                partial.replace(segmentation)
-            archive.unlink()
-        if not embedding.exists():
-            _fetch(EMBEDDING_URL, embedding)
-
-        self._sherpa = sherpa_onnx
         self._embedding_config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(embedding), num_threads=threads)
         self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(self._embedding_config)
 
@@ -199,18 +211,166 @@ class Diarizer:
         # while a merge here (a short turn lumped in with the next speaker) cannot be undone.
         self._whole = diarizer(0.8)
         self._live = diarizer(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3")))
-        self._live_lock = threading.Lock()
-        self._whole_lock = threading.Lock()
 
-    def _turns(self, audio: np.ndarray, live: bool = False) -> list[Turn]:
+    def turns(self, audio: np.ndarray, live: bool) -> list[tuple[float, float, int]]:
         result = (self._live if live else self._whole).process(audio).sort_by_start_time()
-        return tidy([Turn(s.start, s.end, s.speaker) for s in result])
+        return [(s.start, s.end, s.speaker) for s in result]
 
     def voice(self, audio: np.ndarray) -> np.ndarray:
         stream = self._extractor.create_stream()
         stream.accept_waveform(RATE, audio)
         stream.input_finished()
         return np.array(self._extractor.compute(stream), dtype=np.float32)
+
+
+# -- child processes -----------------------------------------------------------------------------
+# One for live calls and one for whole recordings, as the two used to have their own models and
+# locks: a long upload never holds up a call. Each loads its own models once, at start.
+
+_child: object | None = None  # in a child process: the models (a `Sherpa`, or a test's stand-in)
+
+
+def _child_start(factory, nice: int) -> None:
+    global _child
+    os.nice(nice)  # the web server and the GPU feed come first when the machine is busy
+    _child = factory()
+
+
+def _child_turns(audio, live: bool):
+    return _child.turns(_open(audio), live)  # type: ignore[union-attr]
+
+
+def _child_voice(audio):
+    return _child.voice(_open(audio))  # type: ignore[union-attr]
+
+
+def _child_ping() -> bool:
+    return _child is not None
+
+
+# Audio of at least this many samples goes to a child through shared memory instead of a pickle:
+# a recording of hours is hundreds of MB, and pickling would copy it twice over.
+SHARE_FROM = RATE * 60
+
+
+def _share(audio: np.ndarray):
+    """The audio as something a child opens with `_open`: itself if small, else a shared block."""
+    if len(audio) < SHARE_FROM:
+        return audio, None
+    block = shared_memory.SharedMemory(create=True, size=audio.nbytes)
+    np.ndarray(audio.shape, audio.dtype, buffer=block.buf)[:] = audio
+    return (block.name, audio.shape, audio.dtype.str), block
+
+
+def _open(audio) -> np.ndarray:
+    if isinstance(audio, np.ndarray):
+        return audio
+    name, shape, dtype = audio
+    block = shared_memory.SharedMemory(name=name)
+    try:
+        return np.ndarray(shape, np.dtype(dtype), buffer=block.buf).copy()
+    finally:
+        block.close()
+
+
+class ChildProcess:
+    """One worker process that runs `fn` calls one at a time, with its models loaded at start.
+
+    If it dies (killed for memory, say) the call in flight fails with `RuntimeError`, and the next
+    call starts a new one rather than leaving every later call broken.
+    """
+
+    def __init__(self, factory, name: str, nice: int = 10):
+        self._factory, self._name, self._nice = factory, name, nice
+        self._lock = threading.Lock()
+        self._pool: ProcessPoolExecutor | None = None
+
+    def _ensure(self) -> ProcessPoolExecutor:
+        with self._lock:
+            if self._pool is None:
+                # spawn, not fork: this process has threads, CUDA and an event loop.
+                self._pool = ProcessPoolExecutor(
+                    1,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_child_start,
+                    initargs=(self._factory, self._nice),
+                )
+            return self._pool
+
+    def start(self) -> None:
+        """Start the process and wait until its models have loaded."""
+        self.call(_child_ping)
+
+    def call(self, fn, *args):
+        pool = self._ensure()
+        try:
+            return pool.submit(fn, *args).result()
+        except BrokenProcessPool as error:
+            with self._lock:
+                if self._pool is pool:
+                    self._pool = None
+            pool.shutdown(wait=False, cancel_futures=True)
+            log.error("the %s process died: %s", self._name, error)
+            raise RuntimeError(f"the {self._name} process died") from error
+
+    def close(self) -> None:
+        with self._lock:
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+class Diarizer:
+    """sherpa-onnx diarization and speaker embeddings. Thread-safe: live calls (`turns`) and whole
+    recordings (`whole`) use separate models and locks, so a long upload never holds up a call.
+
+    `isolated` (the default) runs the models in child processes. sherpa-onnx holds Python's global
+    lock for a whole call, so in this process one recording would freeze every request, the
+    dashboard's included, until it was done.
+    """
+
+    def __init__(self, models_dir: Path, threads: int = 8, isolated: bool = True, factory=None):
+        if factory is None:
+            fetch_models(models_dir)  # once, here, not in both children at the same time
+            factory = partial(Sherpa, models_dir, threads)
+        if isolated:
+            self._sherpa = None
+            self._whole_process = ChildProcess(factory, "speaker separation (recordings)")
+            self._live_process = ChildProcess(factory, "speaker separation (calls)")
+            for process in (self._whole_process, self._live_process):
+                process.start()
+        else:
+            self._sherpa = factory()
+        self._live_lock = threading.Lock()
+        self._whole_lock = threading.Lock()
+
+    def close(self) -> None:
+        if self._sherpa is None:
+            self._whole_process.close()
+            self._live_process.close()
+
+    def _call(self, live: bool, local, remote, audio: np.ndarray):
+        if self._sherpa is not None:
+            return local(audio)
+        shared, block = _share(audio)
+        try:
+            return (self._live_process if live else self._whole_process).call(remote, shared)
+        finally:
+            if block is not None:
+                block.close()
+                block.unlink()
+
+    def _turns(self, audio: np.ndarray, live: bool = False) -> list[Turn]:
+        raw = self._call(
+            live,
+            lambda a: self._sherpa.turns(a, live),
+            partial(_child_turns, live=live),
+            audio,
+        )
+        return tidy([Turn(start, end, label) for start, end, label in raw])
+
+    def voice(self, audio: np.ndarray) -> np.ndarray:
+        return self._call(True, self._sherpa.voice if self._sherpa is not None else None, _child_voice, audio)
 
     def turns(self, audio: np.ndarray, book: SpeakerBook) -> list[tuple[Turn, Speaker]]:
         """Split one utterance into turns and name each turn's speaker from the session's book.

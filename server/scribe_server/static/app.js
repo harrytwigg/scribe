@@ -338,7 +338,7 @@ class Viewer {
 
 // ---- routing: the tab and the open call live in the URL, so a refresh keeps them -------------
 
-const TABS = ['models', 'live', 'history', 'transcribe', 'try'];
+const TABS = ['models', 'live', 'history', 'transcribe', 'try', 'extension'];
 
 function route() {
   const [tab, id] = location.hash.slice(1).split('/');
@@ -722,6 +722,7 @@ function start() {
   showTab(tab, id); // also after signing in again, when the tabs were hidden
   if (started) return;
   started = true;
+  $('#ext-server').textContent = location.origin; // what the extension's server setting should say
   refreshModels();
   txRestore(); // transcriptions that were running when the page reloaded
   // New and ended calls show up in the lists without a refresh.
