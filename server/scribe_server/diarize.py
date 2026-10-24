@@ -220,8 +220,12 @@ class Sherpa:
         # found the right speaker count on the test conversation (0.5 split speakers). For live
         # utterances it is set to over-split instead: the session's book merges the pieces back,
         # while a merge here (a short turn lumped in with the next speaker) cannot be undone.
-        self._whole = sherpa_onnx.OfflineSpeakerDiarization(config(0.8))
-        self._live = sherpa_onnx.OfflineSpeakerDiarization(config(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3"))))
+        self._whole = sherpa_onnx.OfflineSpeakerDiarization(config(0.8)) if role in ("recordings", "both") else None
+        self._live = (
+            sherpa_onnx.OfflineSpeakerDiarization(config(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3"))))
+            if role in ("calls", "both")
+            else None
+        )
 
     def turns(self, audio: np.ndarray, live: bool, num_speakers: int | None = None) -> list[tuple[float, float, int]]:
         """`num_speakers` (whole recordings only): cluster to exactly this many speakers."""
@@ -248,7 +252,11 @@ class Cancelled(RuntimeError):
 
 
 def _watch_parent(parent_pid: int) -> None:
-    """A child must not outlive the server, even one that was killed outright."""
+    """A child should not outlive the server, even one that was killed outright. This is a Python
+    thread, and a sherpa call holds the global lock, so a child that is busy exits when its call
+    ends, not at once (systemd's KillMode=control-group, the default, stops it sooner). PDEATHSIG
+    would be immediate, but it fires when the *thread* that started the child exits, and the
+    children are started from a loader thread that does."""
     while True:
         time.sleep(2)
         if os.getppid() != parent_pid:
