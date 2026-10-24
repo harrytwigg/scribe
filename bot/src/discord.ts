@@ -71,7 +71,7 @@ export class ScribeBot {
 
   constructor(
     private readonly config: Config,
-    private readonly server = new ScribeClient(config.serverUrl, config.apiToken),
+    private readonly server = new ScribeClient(config.serverUrl),
   ) {
     this.client.once(Events.ClientReady, (ready) => this.onReady(ready.user.tag))
     this.client.on(Events.InteractionCreate, (interaction) => {

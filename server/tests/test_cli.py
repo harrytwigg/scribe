@@ -35,7 +35,6 @@ def served(tmp_path, monkeypatch):
     while not server.started:
         time.sleep(0.01)
     monkeypatch.setenv("SCRIBE_URL", f"http://127.0.0.1:{port}")
-    monkeypatch.setenv("SCRIBE_API_TOKEN", "test-token")
     monkeypatch.setenv("SCRIBE_ENV_FILE", str(tmp_path / "no-env"))
     harness.url = f"http://127.0.0.1:{port}"
     yield harness
@@ -135,10 +134,6 @@ def test_download_saves_the_audio(monkeypatch, tmp_path, capsys):
 
 def test_errors_have_distinct_exit_codes(served, tmp_path, monkeypatch, capsys):
     assert run(capsys, "transcribe", str(tmp_path / "missing.mp3"))[0] == 2
-    monkeypatch.setenv("SCRIBE_API_TOKEN", "wrong")
-    code, _, err = run(capsys, "status")
-    assert code == 5 and "rejected the token" in err
-    monkeypatch.setenv("SCRIBE_API_TOKEN", "test-token")
     bad = tmp_path / "bad.wav"
     bad.write_bytes(b"not audio")
     code, _, err = run(capsys, "transcribe", str(bad), "-q")
@@ -152,27 +147,15 @@ def test_errors_have_distinct_exit_codes(served, tmp_path, monkeypatch, capsys):
     assert run(capsys, "transcribe", "https://example.com/dead.mp3", "-q")[0] == 4
 
 
-def test_settings_come_from_the_env_file_then_the_secrets_file(tmp_path, monkeypatch):
-    secrets = tmp_path / "secrets.json"
-    secrets.write_text(json.dumps({"SCRIBE_API_TOKEN": "from-secrets"}))
+def test_the_server_url_comes_from_the_flag_then_the_env_then_the_env_file(tmp_path, monkeypatch):
     env = tmp_path / "env"
-    env.write_text(f"# comment\nSCRIBE_SERVER_URL=http://box:9000/\nSCRIBE_SECRETS_FILE={secrets}\n")
+    env.write_text("# comment\nSCRIBE_SERVER_URL=http://box:9000/\n")
     monkeypatch.setenv("SCRIBE_ENV_FILE", str(env))
-    for name in ("SCRIBE_URL", "SCRIBE_API_TOKEN", "SCRIBE_SECRETS_FILE"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("SCRIBE_URL", raising=False)
     assert cli.server_url(None) == "http://box:9000"
-    assert cli.api_token(None) == "from-secrets"
     assert cli.server_url("http://flag:1/") == "http://flag:1"
-    monkeypatch.setenv("SCRIBE_API_TOKEN", "from-env")
-    assert cli.api_token(None) == "from-env" and cli.api_token("flag") == "flag"
-
-
-def test_a_wrong_token_is_reported_before_a_large_upload(served, tmp_path, monkeypatch, capsys):
-    big = tmp_path / "big.wav"
-    big.write_bytes(wav(tone(3)) + b"\0" * (30 * 1024 * 1024))  # the server would reset the connection mid-send
-    monkeypatch.setenv("SCRIBE_API_TOKEN", "wrong")
-    code, _, err = run(capsys, "transcribe", str(big), "-q")
-    assert code == 5 and "rejected the token" in err and "cannot reach" not in err
+    monkeypatch.setenv("SCRIBE_URL", "http://env:2/")
+    assert cli.server_url(None) == "http://env:2"
 
 
 def test_a_busy_server_queues_the_upload_and_the_cli_says_where_it_stands(served, tmp_path, capsys):
@@ -180,7 +163,7 @@ def test_a_busy_server_queues_the_upload_and_the_cli_says_where_it_stands(served
     served.loader.engines["alpha"].delay = 0.2
     path = tmp_path / "talk.wav"
     path.write_bytes(AUDIO)
-    first = cli.Server(served.url, "test-token").call("POST", "/api/transcriptions", body=AUDIO)  # takes the only slot
+    first = cli.Server(served.url).call("POST", "/api/transcriptions", body=AUDIO)  # takes the only slot
     code, out, err = run(capsys, "transcribe", str(path))
     assert code == 0 and "queued (position 1)" in err and out.count("alpha:") == 2
     assert first["id"]

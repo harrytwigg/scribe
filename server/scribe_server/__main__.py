@@ -36,7 +36,7 @@ def build(settings: Settings) -> Services:
         store=Store(settings.data_dir / "scribe.db"),
         worker=GpuWorker(settings.queue_depth),
         vad=SileroVad(settings.models_dir),
-        auth=Auth(settings.api_token, settings.trust_localhost, settings.extension_origins, tuple(settings.hosts)),
+        auth=Auth(settings.extension_origins),
         audio_dir=settings.data_dir / "audio" if settings.keep_audio else None,
         allowed_hosts=settings.host_allowlist(),
         open_sessions_file=settings.data_dir / "open-sessions",

@@ -28,18 +28,13 @@ const RETRYABLE = new Set([502, 503, 504])
 export class ScribeClient {
   constructor(
     private readonly baseUrl: string,
-    private readonly token?: string,
     private readonly options: { retryDelaysMs?: number[]; timeoutMs?: number } = {},
   ) {}
-
-  private headers(extra: Record<string, string> = {}): Record<string, string> {
-    return this.token ? { Authorization: `Bearer ${this.token}`, ...extra } : extra
-  }
 
   private async request<T>(method: string, path: string, body?: BodyInit, contentType?: string): Promise<T> {
     const response = await fetch(new URL(path, this.baseUrl), {
       method,
-      headers: this.headers(contentType ? { 'Content-Type': contentType } : {}),
+      headers: contentType ? { 'Content-Type': contentType } : {},
       body,
       signal: AbortSignal.timeout(this.options.timeoutMs ?? 120_000),
     })

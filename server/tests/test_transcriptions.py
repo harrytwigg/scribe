@@ -101,7 +101,6 @@ def test_up_front_refusals(harness):
         harness.services.max_upload_bytes = 100
         assert upload(c).status_code == 413
         assert c.get("/api/transcriptions/nope").status_code == 404
-    assert harness.anonymous.post("/api/transcriptions", content=b"x").status_code == 401
 
 
 def test_a_podcast_link_is_fetched_and_transcribed(harness):

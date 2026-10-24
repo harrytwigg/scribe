@@ -1,4 +1,4 @@
-"""The GUI in a real browser against a real server on the GPU: sign in, pick models, transcribe,
+"""The GUI in a real browser against a real server on the GPU: open it, pick models, transcribe,
 download, watch a live session, read history.
 
     uv run playwright install chromium   # once
@@ -22,15 +22,11 @@ import pytest
 
 pytestmark = pytest.mark.gui
 
-TOKEN = "gui-token"
 JFK = Path(__file__).parent / "fixtures" / "jfk.wav"
 CONVERSATION = Path(__file__).parent / "fixtures" / "conversation.wav"
 # Text to type into the next prompt() the page opens (renaming a speaker).
 PROMPT_ANSWERS: list[str] = []
 SHOTS = Path(os.environ.get("SCRIBE_GUI_SHOTS", Path(__file__).parents[2] / "evidence" / "gui"))
-# The browser looks like a proxied, non-local client, so it has to sign in like one would over
-# the tailnet or the public edge.
-REMOTE = {"X-Forwarded-For": "100.64.0.7"}
 
 
 @pytest.fixture(scope="module")
@@ -45,14 +41,13 @@ def server():
         "SCRIBE_PORT": str(port),
         "SCRIBE_DATA_DIR": data_dir,
         "SCRIBE_MODELS_DIR": os.environ.get("SCRIBE_MODELS_DIR", str(Path("~/.local/share/scribe/models").expanduser())),
-        "SCRIBE_API_TOKEN": TOKEN,
         "SCRIBE_DEFAULT_MODEL": "",
     }
     process = subprocess.Popen([sys.executable, "-m", "scribe_server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = f"http://127.0.0.1:{port}"
     for _ in range(240):
         try:
-            httpx.get(f"{base}/api/whoami")
+            httpx.get(f"{base}/api/status")
             break
         except httpx.HTTPError:
             time.sleep(0.5)
@@ -69,7 +64,7 @@ def page(server):
     SHOTS.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        context = browser.new_context(extra_http_headers=REMOTE, viewport={"width": 1280, "height": 900})
+        context = browser.new_context(viewport={"width": 1280, "height": 900})
         page = context.new_page()
         page.on("dialog", lambda dialog: dialog.accept(PROMPT_ANSWERS.pop(0) if dialog.type == "prompt" and PROMPT_ANSWERS else ""))
         yield page
@@ -95,18 +90,12 @@ def try_clip(page):
 
 
 def test_gui(server, page):
-    api = httpx.Client(base_url=server, headers={"Authorization": f"Bearer {TOKEN}"})
+    api = httpx.Client(base_url=server)
 
-    # Sign-in is required off-host; a wrong token is refused.
+    # No sign-in: the dashboard opens straight onto the models.
     page.goto(server)
-    page.locator("#login").wait_for()
-    shot(page, "01-sign-in")
-    page.fill("#token", "wrong")
-    page.click("#login-form button")
-    page.get_by_text("Wrong token.").wait_for()
-    page.fill("#token", TOKEN)
-    page.click("#login-form button")
     page.locator(".card").first.wait_for()
+    assert page.locator("#login").count() == 0
     assert page.locator(".card").count() == 8
 
     # Pick Parakeet, transcribe the clip.
@@ -235,7 +224,7 @@ def test_gui(server, page):
 def test_gui_keeps_its_place(server, page):
     """With two calls live: switching tabs and back keeps each tab's call, a list refresh during a
     slow open does not take the viewer elsewhere, and a call deleted elsewhere is noticed."""
-    api = httpx.Client(base_url=server, headers={"Authorization": f"Bearer {TOKEN}"})
+    api = httpx.Client(base_url=server)
     a = api.post("/api/sessions", json={"source": "browser", "title": "Nav A"}).json()["id"]
     time.sleep(0.05)
     b = api.post("/api/sessions", json={"source": "browser", "title": "Nav B"}).json()["id"]  # newest
@@ -292,10 +281,6 @@ def test_gui_keeps_its_place(server, page):
 def test_gui_transcribe_tab(server, page):
     """Queue recordings and links in the Transcribe tab, and follow each one's progress."""
     page.goto(server)
-    page.locator("#login, .card").first.wait_for()  # signed in already, or asked to
-    if page.locator("#login").is_visible():
-        page.fill("#token", TOKEN)
-        page.click("#login-form button")
     page.locator(".card").first.wait_for()
     if "Active:" not in page.inner_text("#status"):
         use_model(page, "parakeet-tdt-0.6b-v2")

@@ -116,7 +116,7 @@ class Fetcher:
     """HTTP GET with a browser-ish User-Agent. `public_only` is for a server fetching on a
     client's behalf: it refuses loopback, private and link-local addresses, redirects included
     (it resolves the name before connecting, so a DNS-rebinding host could still slip through;
-    the server is reachable only by a holder of the API token)."""
+    the server is reachable only from this machine and its tailnet)."""
 
     def __init__(self, public_only: bool = False, timeout: float = 30):
         self.public_only = public_only

@@ -80,9 +80,6 @@ label.check { display: inline-flex; gap: 6px; align-items: center; }
 .tx-item .state.error { color: var(--warn); }
 .tx-view { margin-top: 12px; }
 .result { margin-top: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-height: 80px; white-space: pre-wrap; }
-#login { max-width: 420px; margin: 48px auto; }
-#login-form { display: flex; gap: 8px; }
-#login-form input { flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
 @media (max-width: 700px) {
   main { padding: 16px; }
   .split { grid-template-columns: 1fr; }

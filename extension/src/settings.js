@@ -1,9 +1,7 @@
-// Settings live in chrome.storage.local (the token too: it never leaves this browser except to the
-// configured server).
+// Settings live in chrome.storage.local.
 
 export const DEFAULTS = {
   server: 'http://harry-box:8787',
-  token: '',
   myName: 'Me',
   othersName: 'Others',
   useMic: true,

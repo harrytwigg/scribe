@@ -14,7 +14,6 @@ from scribe_server.models import ModelManager
 from scribe_server.store import Store
 from scribe_server.worker import GpuWorker
 
-TOKEN = "test-token"
 
 
 def entry(model_id: str) -> CatalogueEntry:
@@ -115,7 +114,7 @@ def wav(audio: np.ndarray, rate: int = RATE) -> bytes:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, token: str | None = TOKEN):
+    def __init__(self, tmp_path: Path):
         self.loader = FakeLoader()
         self.downloader = FakeDownloader()
         self.models = ModelManager(
@@ -125,12 +124,10 @@ class Harness:
         self.worker = GpuWorker(depth=4)
         self.services = Services(
             models=self.models, store=Store(tmp_path / "scribe.db"), worker=self.worker,
-            vad=energy_vad, auth=Auth(token),
+            vad=energy_vad, auth=Auth(),
         )
         self.app = create_app(self.services)
-        # The bot and API clients always send the token; `anonymous` is a client that does not.
-        self.client = TestClient(self.app, headers={"Authorization": f"Bearer {TOKEN}"} if token else {})
-        self.anonymous = TestClient(self.app)
+        self.client = TestClient(self.app)
 
     def ready(self, model_id: str = "alpha") -> None:
         self.models.download(model_id)

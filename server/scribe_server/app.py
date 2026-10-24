@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from . import exports, podcast
 from .audio import RATE, AudioError, Vad, decode, speech_chunks, speech_spans
-from .auth import COOKIE, Auth
+from .auth import Auth
 from .diarize import DiarizerSlot, Speaker, SpeakerBook, Turn
 from .models import Conflict, ModelManager, NoActiveModel, NotFound
 from .store import Store
@@ -168,10 +168,6 @@ class Hub:
                 queue.put_nowait((event, data))
             except asyncio.QueueFull:
                 pass
-
-
-class Login(BaseModel):
-    token: str
 
 
 class NewSession(BaseModel):
@@ -394,27 +390,6 @@ def create_app(services: Services) -> FastAPI:
         if not spans:
             return []
         return await on_worker(s.worker, lambda: words_by_turn(audio, spans) or each_turn(audio, spans))
-
-    # -- auth -----------------------------------------------------------------------------------
-
-    @app.post("/api/login")
-    def login(body: Login, request: Request, response: Response) -> dict:
-        if not s.auth.same_origin(request):
-            raise HTTPException(403, "cross-origin request refused")
-        if not s.auth.check_token(body.token):
-            raise HTTPException(401, "wrong token")
-        response.set_cookie(COOKIE, s.auth.new_session(), httponly=True, samesite="strict", secure=request.url.scheme == "https")
-        return {"ok": True}
-
-    @app.post("/api/logout")
-    def logout(request: Request, response: Response) -> dict:
-        s.auth.end_session(request.cookies.get(COOKIE))
-        response.delete_cookie(COOKIE)
-        return {"ok": True}
-
-    @app.get("/api/whoami")
-    def whoami(request: Request) -> dict:
-        return {"authorised": s.auth.authorised(request), "auth_enabled": s.auth.enabled}
 
     # -- models ---------------------------------------------------------------------------------
 

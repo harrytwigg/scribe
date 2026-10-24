@@ -21,16 +21,6 @@
   </header>
 
   <main>
-    <section id="login" hidden>
-      <h2>Sign in</h2>
-      <p>Paste the scribe API token.</p>
-      <form id="login-form">
-        <input id="token" type="password" autocomplete="current-password" placeholder="API token" required>
-        <button type="submit">Sign in</button>
-      </form>
-      <p id="login-error" class="error"></p>
-    </section>
-
     <section id="tab-models" class="tab">
       <p class="hint">Download a model, then <strong>Use</strong> it. Everything transcribed from then on, including the Discord bot, uses the active model.</p>
       <div id="models" class="cards"></div>
@@ -83,7 +73,7 @@
       <ol class="steps">
         <li><a id="ext-download" href="/api/extension.zip" download>Download scribe-extension.zip</a> and unzip it somewhere permanent (not Downloads or a temporary folder).</li>
         <li>In Chrome open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>, press <strong>Load unpacked</strong> and pick the unzipped folder.</li>
-        <li>Open the extension's <strong>Settings</strong>: set the server to <code id="ext-server"></code>, paste the API token, enter your name, and press <strong>Allow microphone</strong> once.</li>
+        <li>Open the extension's <strong>Settings</strong>: set the server to <code id="ext-server"></code>, enter your name, and press <strong>Allow microphone</strong> once.</li>
       </ol>
       <p class="hint">Repeat for each Chrome profile. Moving or deleting the folder removes the extension from Chrome the next time it starts.</p>
     </section>

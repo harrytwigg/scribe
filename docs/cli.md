@@ -66,7 +66,7 @@ Spotify pages likewise fail.
 | `--no-save` | Do not keep the transcript in the server's History (default: kept, titled with the episode). |
 | `--keep-audio DIR` | Keep the downloaded audio in DIR (default: deleted after the upload). |
 | `-q` | No progress on stderr. |
-| `--server URL`, `--token T` | Server and API token. Defaults below. |
+| `--server URL` | The scribe server. Default below. |
 
 ### JSON output
 
@@ -113,7 +113,7 @@ the message is on stderr either way).
 | 2 | Bad usage (SOURCE is neither an existing file nor a link) |
 | 3 | No audio for that link: not a public podcast, Spotify exclusive, no matching episode, unsupported link kind. Retrying will not help. |
 | 4 | Network or download failure (the link, the feed or the audio host). May be transient. |
-| 5 | The scribe server is unreachable, rejected the token, has no active model, or refused the upload (too large) |
+| 5 | The scribe server is unreachable, has no active model, or refused the upload (too large) |
 | 6 | The server failed to transcribe (undecodable audio, internal error) |
 | 7 | Several sources: some succeeded and some failed (each failure is in the JSON array and on stderr). If every source failed, the first failure's code is used |
 | 130 | Interrupted (the running transcription is cancelled on the server) |
@@ -122,9 +122,7 @@ the message is on stderr either way).
 
 - **Server:** `--server`, else `$SCRIBE_URL`, else `SCRIBE_SERVER_URL` in `~/.config/scribe/env`,
   else `http://127.0.0.1:8787`.
-- **Token:** `--token`, else `$SCRIBE_API_TOKEN`, else `SCRIBE_API_TOKEN` in that env file, else
-  the JSON secrets file named by `$SCRIBE_SECRETS_FILE` (or that env file's `SCRIBE_SECRETS_FILE`).
-  On harry-box the env file already points at the instance's secrets, so `scribe` works with no setup.
+- There is no API token: on harry-box `scribe` works with no setup, and elsewhere only the server URL is needed.
 - `$SCRIBE_ENV_FILE` overrides the env file's path.
 
 ## Limits and behaviour worth knowing
@@ -152,4 +150,4 @@ saved in History. The server API behind both: `POST /api/transcriptions` (body =
 `GET /api/transcriptions/{id}` (poll: `status` of queued, fetching, decoding, transcribing, done, error or
 cancelled; `progress` 0 to 1 over the whole job, `stage_progress` of the transcribing, `download` {done, total}
 bytes for a link, `queue_position`, `step`, `error`, `result`, `session_id`),
-`DELETE /api/transcriptions/{id}` (cancel). Same token as the rest of the API.
+`DELETE /api/transcriptions/{id}` (cancel). No token, like the rest of the API.

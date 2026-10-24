@@ -14,9 +14,8 @@ export class ServerError extends Error {
 const RETRYABLE = new Set([502, 503, 504])
 
 export class ScribeClient {
-  constructor(baseUrl, token, { retryDelaysMs = [1000, 3000], timeoutMs = 120_000, fetch: fetchImpl } = {}) {
+  constructor(baseUrl, { retryDelaysMs = [1000, 3000], timeoutMs = 120_000, fetch: fetchImpl } = {}) {
     this.baseUrl = baseUrl
-    this.token = token
     this.retryDelaysMs = retryDelaysMs
     this.timeoutMs = timeoutMs
     // Unbound, a browser's fetch throws "Illegal invocation".
@@ -24,7 +23,7 @@ export class ScribeClient {
   }
 
   async request(method, path, body, contentType) {
-    const headers = this.token ? { Authorization: `Bearer ${this.token}` } : {}
+    const headers = {}
     if (contentType) headers['Content-Type'] = contentType
     const response = await this.fetch(new URL(path, this.baseUrl), {
       method,

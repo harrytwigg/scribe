@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from .conftest import TOKEN, silence, tone, wav
+from .conftest import silence, tone, wav
 
 REMOTE = {"X-Forwarded-For": "100.64.0.9"}
 
@@ -140,77 +140,15 @@ def test_optouts(harness):
     assert c.get("/api/optouts/discord").json() == []
 
 
-def test_every_request_needs_the_token(harness):
-    c = harness.anonymous
-    for headers in ({}, REMOTE):  # loopback is not trusted: agent sessions share the box
-        assert c.get("/api/models", headers=headers).status_code == 401
-        assert c.get("/api/sessions", headers=headers).status_code == 401
-        assert c.post("/v1/audio/transcriptions", headers=headers).status_code == 401
-    assert c.get("/api/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert c.get("/api/models", headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 200
-    assert c.get("/").status_code == 200  # the sign-in page itself is public
-    assert c.get("/api/whoami").json() == {"authorised": False, "auth_enabled": True}
-
-
-def test_trust_localhost_is_opt_in(tmp_path):
-    from fastapi.testclient import TestClient
-
-    from scribe_server.app import create_app
-    from scribe_server.auth import Auth
-
-    from .conftest import Harness
-
-    h = Harness(tmp_path)
-    h.services.auth = Auth(TOKEN, trust_localhost=True)
-    c = TestClient(create_app(h.services))
-    assert c.get("/api/models").status_code == 200
-    assert c.get("/api/models", headers=REMOTE).status_code == 401  # proxied: not local
-    h.worker.stop()
-
-
-def test_trust_localhost_covers_the_machines_own_addresses(tmp_path):
-    from fastapi.testclient import TestClient
-
-    from scribe_server.app import create_app
-    from scribe_server.auth import Auth
-
-    from .conftest import Harness
-
-    h = Harness(tmp_path)
-    h.services.auth = Auth(TOKEN, trust_localhost=True, own_addresses=("127.0.0.1", "100.76.208.67"))
-    app = create_app(h.services)
-
-    def get(source: str, **headers):
-        return TestClient(app, client=(source, 50000)).get("/api/models", headers=headers).status_code
-
-    assert get("127.0.0.1") == 200 and get("127.0.1.1") == 200 and get("::1") == 200  # loopback
-    assert get("100.76.208.67") == 200  # this machine, opened by its own tailnet address
-    assert get("100.76.208.99") == 401  # another tailnet machine
-    assert get("100.76.208.67", **{"X-Forwarded-For": "100.64.0.9"}) == 401  # proxied: not local
-    # off by default, even from the machine's own address
-    h.services.auth = Auth(TOKEN, own_addresses=("100.76.208.67",))
-    assert TestClient(create_app(h.services), client=("100.76.208.67", 1)).get("/api/models").status_code == 401
-    h.worker.stop()
-
-
-def test_no_token_means_no_checks(tmp_path):
-    from .conftest import Harness
-
-    h = Harness(tmp_path, token=None)
-    assert h.client.get("/api/models", headers=REMOTE).status_code == 200
-    h.worker.stop()
-
-
-def test_gui_login_cookie(harness):
-    c = harness.anonymous
-    assert c.post("/api/login", json={"token": "wrong"}, headers=REMOTE).status_code == 401
-    r = c.post("/api/login", json={"token": TOKEN}, headers=REMOTE)
-    assert r.status_code == 200
-    cookie = r.headers["set-cookie"]
-    assert "HttpOnly" in cookie and "SameSite=strict" in cookie
-    assert c.get("/api/models", headers=REMOTE).status_code == 200
-    c.post("/api/logout", headers=REMOTE)
-    assert c.get("/api/models", headers=REMOTE).status_code == 401
+def test_no_token_is_asked_for_from_anywhere(harness):
+    c = harness.client
+    for headers in ({}, REMOTE):  # on this machine, from the tailnet, or through a proxy
+        assert c.get("/api/models", headers=headers).status_code == 200
+        assert c.get("/api/sessions", headers=headers).status_code == 200
+    assert c.get("/").status_code == 200
+    # the sign-in endpoints are gone
+    assert c.post("/api/login", json={"token": "x"}).status_code in (404, 405)
+    assert c.get("/api/whoami").status_code in (404, 405)
 
 
 def test_cross_origin_writes_refused_even_locally(harness):
@@ -219,25 +157,52 @@ def test_cross_origin_writes_refused_even_locally(harness):
     c = harness.client
     evil = {"Origin": "https://evil.example"}
     assert c.post("/api/models/alpha/activate", headers=evil).status_code == 403
-    assert c.post("/api/login", json={"token": TOKEN}, headers=evil).status_code == 403
     assert c.post("/api/models/alpha/activate", headers={"Origin": "http://testserver"}).status_code == 202
+    assert c.get("/api/models", headers=evil).status_code == 200  # reads are not state-changing
 
 
-def test_extension_origin_allowed_with_token_only(harness):
-    """The Chrome extension's own origin may write (docs/spec.md 4), but still needs the token,
-    and cannot sign in for a cookie."""
+def test_extension_origin_may_write_other_extensions_may_not(harness):
+    """The Chrome extension's own origin may write (docs/spec.md 4); another origin may not."""
     from scribe_server.auth import Auth
     from scribe_server.config import EXTENSION_ORIGIN
 
-    harness.services.auth = Auth(TOKEN, extension_origins=(EXTENSION_ORIGIN,))
-    ext = {"Origin": EXTENSION_ORIGIN, **REMOTE}
-    bearer = {"Authorization": f"Bearer {TOKEN}"}
-    c = harness.anonymous
-    assert c.post("/api/sessions", json={"source": "browser"}, headers=ext).status_code == 401
-    assert c.post("/api/sessions", json={"source": "browser"}, headers={**ext, **bearer}).status_code == 201
-    other = {"Origin": "chrome-extension://abcdefghijklmnopabcdefghijklmnop", **REMOTE, **bearer}
+    harness.services.auth = Auth(extension_origins=(EXTENSION_ORIGIN,))
+    c = harness.client
+    assert c.post("/api/sessions", json={"source": "browser"}, headers={"Origin": EXTENSION_ORIGIN}).status_code == 201
+    other = {"Origin": "chrome-extension://abcdefghijklmnopabcdefghijklmnop"}
     assert c.post("/api/sessions", json={"source": "browser"}, headers=other).status_code == 403
-    assert c.post("/api/login", json={"token": TOKEN}, headers=ext).status_code == 403
+
+
+def test_the_server_refuses_to_listen_on_every_interface():
+    import socket
+
+    import pytest
+
+    from scribe_server.config import Settings
+
+    def settings(*hosts):
+        return Settings(
+            hosts=list(hosts), port=0, data_dir=None, models_dir=None, device="cpu", keep_audio=False,
+            default_model="", queue_depth=1,
+        )
+
+    settings("127.0.0.1", "100.76.208.67", "::1", "localhost").check()  # named addresses are fine
+    # Every way of writing "all interfaces" that the socket layer accepts, and some it does not.
+    wide = ["0.0.0.0", "::", "0", "0.0", "00.0.0.0", "::0", "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0", "<any>", "<broadcast>",
+            "255.255.255.255", "*", "", "harry-box", "224.0.0.1"]
+    for host in wide:
+        with pytest.raises(SystemExit, match="no API token"):
+            settings(host).check()
+        with pytest.raises(SystemExit):
+            settings("127.0.0.1", host).check()  # one wide address in a list is enough
+    with pytest.raises(SystemExit, match="no address"):
+        settings().check()
+    # What the check keeps out really would have bound everywhere (the spellings Python's socket accepts).
+    for spelling in ("0", "0.0"):
+        probe = socket.socket()
+        probe.bind((spelling, 0))
+        assert probe.getsockname()[0] == "0.0.0.0"
+        probe.close()
 
 
 def test_abandoned_browser_sessions_are_ended(harness, monkeypatch):
@@ -292,12 +257,11 @@ def test_live_events_stream(harness):
             if server.started:
                 break
             time.sleep(0.05)
-        auth = {"Authorization": f"Bearer {TOKEN}"}
-        sid = httpx.post(f"{base}/api/sessions", json={"source": "discord"}, headers=auth).json()["id"]
+        sid = httpx.post(f"{base}/api/sessions", json={"source": "discord"}).json()["id"]
         received = []
 
         def listen():
-            with httpx.stream("GET", f"{base}/api/sessions/{sid}/events", timeout=10, headers=auth) as response:
+            with httpx.stream("GET", f"{base}/api/sessions/{sid}/events", timeout=10) as response:
                 for raw in response.iter_lines():
                     if raw.startswith("event:"):
                         received.append((time.monotonic(), raw[6:].strip()))
@@ -311,14 +275,13 @@ def test_live_events_stream(harness):
             f"{base}/api/sessions/{sid}/utterances",
             files={"file": ("u.wav", wav(tone(1)), "audio/wav")},
             data={"speaker_id": "u1", "speaker_name": "Ada", "started_at": str(time.time())},
-            headers=auth,
         )
         assert r.status_code == 201, r.text
         # Both of these are published from handlers that must run on the event loop.
-        httpx.post(f"{base}/api/sessions/{sid}/markers", headers=auth,
+        httpx.post(f"{base}/api/sessions/{sid}/markers",
                    json={"speaker_id": "u1", "speaker_name": "Ada", "started_at": time.time(), "text": "[gap]"})
         ended = time.monotonic()
-        httpx.post(f"{base}/api/sessions/{sid}/end", headers=auth)
+        httpx.post(f"{base}/api/sessions/{sid}/end")
         listener.join(5)
         assert [name for _, name in received] == ["line", "line", "end"]
         assert received[-1][0] - ended < 1.0, "the end event arrived late"
@@ -372,7 +335,7 @@ def test_unknown_host_refused(tmp_path):
 
     h = Harness(tmp_path)
     h.services.allowed_hosts = ["127.0.0.1", "harry-box", "*.ts.net"]
-    c = TestClient(create_app(h.services), headers={"Authorization": f"Bearer {TOKEN}"})
+    c = TestClient(create_app(h.services))
     assert c.get("/api/models", headers={"Host": "attacker.example"}).status_code == 400
     assert c.get("/api/models", headers={"Host": "harry-box:8787"}).status_code == 200
     assert c.get("/api/models", headers={"Host": "harry-box.tail1234.ts.net"}).status_code == 200
@@ -410,7 +373,7 @@ def test_open_sessions_file(harness, tmp_path):
     from scribe_server.app import create_app
 
     harness.services.open_sessions_file = tmp_path / "open-sessions"
-    c = TestClient(create_app(harness.services), headers={"Authorization": f"Bearer {TOKEN}"})
+    c = TestClient(create_app(harness.services))
     assert harness.services.open_sessions_file.read_text() == "0\n"
     sid = c.post("/api/sessions", json={"source": "discord"}).json()["id"]
     assert harness.services.open_sessions_file.read_text() == "1\n"
@@ -427,7 +390,6 @@ def test_rename_session(harness):
     assert c.patch(f"/api/sessions/{sid}", json={"title": " "}).status_code == 400
     assert c.patch(f"/api/sessions/{sid}", json={"title": "x" * 121}).status_code == 400
     assert c.patch("/api/sessions/nope", json={"title": "x"}).status_code == 404
-    assert harness.anonymous.patch(f"/api/sessions/{sid}", json={"title": "x"}).status_code == 401
 
 
 def test_names_are_one_plain_line(harness):
@@ -451,4 +413,3 @@ def test_the_extension_downloads_as_a_zip_to_load_unpacked(harness):
     assert not any(n.startswith("test/") or n == "package.json" for n in names)
     manifest = json.loads(zipfile.ZipFile(io.BytesIO(res.content)).read("manifest.json"))
     assert manifest["manifest_version"] == 3 and manifest["key"]  # the key keeps the extension's id
-    assert harness.anonymous.get("/api/extension.zip").status_code == 401
