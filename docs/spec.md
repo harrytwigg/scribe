@@ -300,6 +300,16 @@ utterance `diarize` (the extension does, for the tab channel only).
   Discord users included.
 - **Whole recordings.** "Try it" (and `/v1/audio/transcriptions` with `diarize=true`) diarizes an
   upload in one pass and returns `segments` with speakers.
+- **Scraps and a known count.** On a long recording the clusterer over-splits: one measured 44-minute
+  two-person podcast came out as 11 speakers, 93% of the speech in two of them and the rest scraps of
+  1 to 75 seconds (a voice over music, the same person on a different line). After clustering,
+  `absorb_scraps` measures each speaker's voice (TitaNet, on up to 45 s of their longest turns) and
+  folds a speaker with under 15 s of speech into the one they sound most like, and one with under 5%
+  of the speech into them if they also sound like them (the `MATCH` similarity), so a real third voice
+  that spoke for a minute stays; the same recording came out as 2. If the caller knows how many people
+  there are, `speakers` (API, 1 to 20; GUI "How many?"; CLI `--num-speakers`) makes the clusterer find
+  exactly that many instead, and nothing is folded. Live calls are not affected: their book already
+  merges speakers. Thresholds: `SCRIBE_DIARIZE_SCRAP_S`, `SCRIBE_DIARIZE_SCRAP_SHARE`.
 - **Its own processes.** sherpa-onnx holds Python's global lock for the whole of a call: measured,
   4 minutes of audio froze every thread of the server for 19 s, and an hour-long recording froze it
   (the dashboard, History, the Discord bot's posts) for minutes. So the models run in two child
