@@ -32,7 +32,6 @@ from .wer import words
 
 pytestmark = pytest.mark.extension
 
-TOKEN = "extension-token"
 JFK = Path(__file__).parent / "fixtures" / "jfk.wav"
 EXTENSION = Path(__file__).parents[2] / "extension"
 EXTENSION_ID = "mcnpmckibkddnnenfondlblnddldonfm"
@@ -64,13 +63,12 @@ def server():
         "SCRIBE_PORT": str(port),
         "SCRIBE_DATA_DIR": data_dir,
         "SCRIBE_MODELS_DIR": os.environ.get("SCRIBE_MODELS_DIR", str(Path("~/.local/share/scribe/models").expanduser())),
-        "SCRIBE_API_TOKEN": TOKEN,
         "SCRIBE_DEFAULT_MODEL": "parakeet-tdt-0.6b-v2",
     }
     env.pop("SCRIBE_EXTENSION_ORIGINS", None)  # the built-in default must admit the extension
     process = subprocess.Popen([sys.executable, "-m", "scribe_server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = f"http://127.0.0.1:{port}"
-    api = httpx.Client(base_url=base, headers={"Authorization": f"Bearer {TOKEN}"})
+    api = httpx.Client(base_url=base)
     for _ in range(240):
         try:
             status = api.get("/api/status").json()
@@ -92,7 +90,7 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
     mic_clip = tmp_path / "mic.wav"
     mic_clip.write_bytes(padded_clip(1.0, 14.0))  # the fake mic loops this file
     tab_clip = base64.b64encode(padded_clip(1.5, 2.0)).decode()
-    api = httpx.Client(base_url=server, headers={"Authorization": f"Bearer {TOKEN}"})
+    api = httpx.Client(base_url=server)
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
@@ -112,14 +110,13 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         # The manifest's public key pins the ID, and so the origin the server admits.
         assert worker.url.startswith(f"chrome-extension://{EXTENSION_ID}/")
         config = {
-            "server": server, "token": TOKEN, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": True,
+            "server": server, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": True,
         }
 
         # Settings: saved through the options page, which tests the connection.
         options = context.new_page()
         options.goto(f"chrome-extension://{EXTENSION_ID}/src/options.html")
         options.fill("[name=server]", server + "/")
-        options.fill("[name=token]", TOKEN)
         options.fill("[name=myName]", "Harry")
         options.fill("[name=othersName]", "Meet")
         options.click("text=Save and test")

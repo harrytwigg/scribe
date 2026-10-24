@@ -12,11 +12,8 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 
-class Unauthorised extends Error {}
-
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options });
-  if (response.status === 401) { showLogin(); throw new Unauthorised(); }
   if (!response.ok) {
     let detail = response.statusText;
     try { detail = (await response.json()).detail ?? detail; } catch {}
@@ -56,30 +53,6 @@ window.addEventListener('hashchange', () => {
   if (tab !== currentTab || (id && id !== (tab === 'live' ? liveViewer.current : historyViewer.current))) showTab(tab, id);
 });
 
-// ---- sign-in ---------------------------------------------------------------------------------
-
-function showLogin() {
-  $('#login').hidden = false;
-  for (const section of document.querySelectorAll('.tab')) section.hidden = true;
-  $('nav').hidden = true;
-}
-$('#login-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  try {
-    await api('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: $('#token').value }) });
-    $('#login').hidden = true;
-    $('nav').hidden = false;
-    $('#token').value = '';
-    // A 401 ended the event streams for good: open the calls afresh.
-    liveViewer.close();
-    historyViewer.close();
-    start();
-  } catch (error) {
-    if (!(error instanceof Unauthorised)) $('#login-error').textContent = error.message;
-    else $('#login-error').textContent = 'Wrong token.';
-  }
-});
-
 // ---- status ----------------------------------------------------------------------------------
 
 let models = [];
@@ -100,7 +73,7 @@ const bar = (value) => el('span', { class: 'bar', 'aria-label': `${value} of 5` 
 
 async function modelAction(method, path, label) {
   try { await api(path, { method }); }
-  catch (error) { if (!(error instanceof Unauthorised)) alertInline(`${label}: ${error.message}`); }
+  catch (error) { alertInline(`${label}: ${error.message}`); }
   refreshModels();
 }
 
@@ -136,7 +109,7 @@ async function refreshModels() {
     models = await api('/api/models');
     $('#models').replaceChildren(...models.map(modelCard));
     await refreshStatus();
-  } catch (error) { if (error instanceof Unauthorised) return; }
+  } catch {}
   const busy = models.some((m) => m.loading || m.status === 'downloading');
   modelsTimer = setTimeout(refreshModels, busy ? 1000 : 5000);
 }
@@ -157,7 +130,7 @@ async function renameSpeaker(session, u, button) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
     });
     showSpeakerName(button.closest('.transcript'), u.speaker_id, renamed.name);
-  } catch (error) { if (!(error instanceof Unauthorised)) alert(error.message); }
+  } catch (error) { alert(error.message); }
 }
 
 // Within one transcript only: speaker ids ("tab", "mic") repeat across calls.
@@ -198,7 +171,7 @@ async function renameSession(id, current) {
     });
     for (const viewer of [liveViewer, historyViewer]) viewer.retitle(id, session.title);
     refreshLists();
-  } catch (error) { if (!(error instanceof Unauthorised)) alert(error.message); }
+  } catch (error) { alert(error.message); }
 }
 
 class Viewer {
@@ -239,7 +212,7 @@ class Viewer {
     const opening = this.opening;
     let session;
     try { session = await api(`/api/sessions/${id}`); } catch (error) {
-      if (opening !== this.opening || error instanceof Unauthorised) return false;
+      if (opening !== this.opening) return false;
       this.showEmpty(error.status === 404 ? 'That call was deleted.' : `Cannot open that call: ${error.message}`);
       return false;
     }
@@ -448,7 +421,6 @@ function uploadFile(item, file, params) {
     request.onerror = () => reject(new Error('The upload failed: the server could not be reached.'));
     request.onload = () => {
       item.upload = null;
-      if (request.status === 401) { showLogin(); reject(new Unauthorised()); return; }
       let body = {};
       try { body = JSON.parse(request.responseText); } catch {}
       if (request.status >= 200 && request.status < 300) resolve(body);
@@ -566,7 +538,6 @@ async function txPoll() {
   try {
     for (const item of txItems.filter((i) => i.id && !i.error && (!i.job || ACTIVE.includes(i.job.status)))) {
       try { item.job = await api(`/api/transcriptions/${item.id}`); } catch (error) {
-        if (error instanceof Unauthorised) return;
         item.error = error.status === 404 ? 'No longer on the server (look in History).' : error.message;
       }
       if (item.job && !ACTIVE.includes(item.job.status)) txPersist();
@@ -620,7 +591,6 @@ $('#tx-form').addEventListener('submit', async (event) => {
       item.job = job;
       txWatch();
     } catch (error) {
-      if (error instanceof Unauthorised) return;
       item.error = error.message;
       item.cancelled = error.cancelled;
       item.upload = null;
@@ -665,7 +635,7 @@ async function transcribeBlob(blob, name) {
         el('p', { class: 'meta' }, meta),
         el('p', { id: 'try-text' }, r.text || '(no speech)'));
     }
-  } catch (error) { if (!(error instanceof Unauthorised)) result.replaceChildren(el('p', { class: 'error' }, error.message)); }
+  } catch (error) { result.replaceChildren(el('p', { class: 'error' }, error.message)); }
 }
 
 $('#try-file').addEventListener('change', (event) => {
@@ -721,7 +691,7 @@ $('#try-record').addEventListener('click', async () => {
 let started = false;
 function start() {
   const { tab, id } = route();
-  showTab(tab, id); // also after signing in again, when the tabs were hidden
+  showTab(tab, id);
   if (started) return;
   started = true;
   $('#ext-server').textContent = location.origin; // what the extension's server setting should say
@@ -731,8 +701,4 @@ function start() {
   setInterval(refreshLists, POLL_MS);
 }
 
-(async () => {
-  const me = await (await fetch('/api/whoami', { credentials: 'same-origin' })).json();
-  if (!me.authorised) showLogin();
-  else start();
-})();
+start();

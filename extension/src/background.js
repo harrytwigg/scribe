@@ -31,7 +31,6 @@ async function setStatus(status) {
 
 async function start({ tabStreamId, title, tabId }) {
   const config = await load()
-  if (!config.token) throw new Error('set the server and token on the options page first')
   if (!(await chrome.permissions.contains({ origins: [originPattern(config.server)] }))) {
     throw new Error(`no permission to reach ${config.server}: save it on the options page`)
   }

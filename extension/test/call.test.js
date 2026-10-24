@@ -5,7 +5,7 @@ import { Call } from '../src/call.js'
 import { ServerError } from '../src/client.js'
 
 function call({ heartbeat = async () => ({ ok: true }), heardAgoMs = 0 } = {}) {
-  const c = new Call({ server: 'http://box:8787', token: 't', myName: 'Me', othersName: 'Others' }, () => {}, { idleStopMs: 600_000 })
+  const c = new Call({ server: 'http://box:8787', myName: 'Me', othersName: 'Others' }, () => {}, { idleStopMs: 600_000 })
   c.sessionId = 's1'
   c.heard = Date.now() - heardAgoMs
   c.client.heartbeat = heartbeat
@@ -46,7 +46,7 @@ test('an unreachable server does not end the call', async () => {
 })
 
 test('a failed session create leaves the call done, so the next start is allowed', async () => {
-  const c = new Call({ server: 'http://box:8787', token: 't' }, () => {})
+  const c = new Call({ server: 'http://box:8787' }, () => {})
   c.client.createSession = async () => { throw new ServerError(401, 'sign in') }
   await assert.rejects(c.start('x', { tab: null, mic: null }), /sign in/)
   assert.equal(c.done, true)

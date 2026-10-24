@@ -42,12 +42,11 @@ Output: the transcript on stdout (or, with --out, written to that file, and its 
 progress and errors on stderr. --format json gives text, timed segments, the episode and the model.
 
 Exit codes: 0 ok; 2 bad usage; 3 no audio for that link (not a public podcast, Spotify exclusive, no matching
-episode); 4 network or download failure; 5 scribe server unreachable, token rejected or no model active;
+episode); 4 network or download failure; 5 scribe server unreachable or no model active;
 6 transcription failed; 130 interrupted.
 
 The server: --server, else $SCRIBE_URL, else SCRIBE_SERVER_URL in ~/.config/scribe/env, else
-http://127.0.0.1:8787. The token: --token, else $SCRIBE_API_TOKEN, else the SCRIBE_SECRETS_FILE
-that env file names (a JSON file holding SCRIBE_API_TOKEN).
+http://127.0.0.1:8787. There is no token to give.
 
 Examples:
   scribe transcribe https://open.spotify.com/episode/4rOoJ6Egrf8K2IrywzwOMk > episode.txt
@@ -91,29 +90,12 @@ def server_url(flag: str | None) -> str:
     return url.rstrip("/")
 
 
-def api_token(flag: str | None) -> str | None:
-    if token := flag or os.environ.get("SCRIBE_API_TOKEN"):
-        return token
-    env = read_env_file()
-    if token := env.get("SCRIBE_API_TOKEN"):
-        return token
-    secrets = os.environ.get("SCRIBE_SECRETS_FILE") or env.get("SCRIBE_SECRETS_FILE")
-    if secrets:
-        try:
-            return json.loads(Path(secrets).expanduser().read_text()).get("SCRIBE_API_TOKEN")
-        except (OSError, ValueError):
-            return None
-    return None
-
-
 class Server:
-    def __init__(self, url: str, token: str | None):
-        self.url, self.token = url, token
+    def __init__(self, url: str):
+        self.url = url
 
     def call(self, method: str, path: str, *, body=None, headers: dict | None = None, timeout: float = 60, raw: bool = False):
         request = urllib.request.Request(self.url + path, data=body, method=method, headers=headers or {})
-        if self.token:
-            request.add_header("Authorization", f"Bearer {self.token}")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = response.read()
@@ -123,11 +105,6 @@ class Server:
                 detail = json.loads(detail).get("detail", detail)
             except (ValueError, AttributeError):
                 pass
-            if error.code == 401:
-                raise CliError(
-                    f"the scribe server at {self.url} rejected the token: set SCRIBE_API_TOKEN, pass --token, or "
-                    f"point SCRIBE_SECRETS_FILE at a JSON file holding it", SERVER, "auth",
-                ) from error
             code = SERVER if error.code in (503, 409, 413, 429) else FAILED
             retry = error.headers.get("Retry-After", "")
             raise CliError(
@@ -194,9 +171,9 @@ def fetch_audio(episode: podcast.Episode, directory: Path, quiet: bool, tag: str
 
 
 def check_server(server: Server) -> None:
-    """Fail early and accurately: unreachable, wrong token, no model. (A server that refuses a
+    """Fail early and accurately: unreachable, no model. (A server that refuses a
     request closes the connection while a large upload is still being sent, which the client sees
-    only as a reset, so the token is checked before any audio is sent.)"""
+    only as a reset, so the server is checked before any audio is sent.)"""
     status = server.call("GET", "/api/status")
     if not status.get("active_model"):
         raise CliError(f"the scribe server at {server.url} has no active model; pick one in its GUI", SERVER, "no_model")
@@ -217,7 +194,7 @@ def start_job(server: Server, path: Path, query: str, quiet: bool, tag: str = ""
             if error.kind == "unreachable":
                 # A server that refuses a large upload closes the connection while it is still
                 # being sent, which arrives here as a reset. Say why if the server answers now
-                # (wrong token, no model); otherwise try again.
+                # (no model); otherwise try again.
                 check_server(server)
                 dropped += 1
                 retry = dropped <= 5
@@ -370,7 +347,7 @@ def cmd_transcribe(args) -> int:
         args.speakers = True
     sources = read_sources(args)
     many = len(sources) > 1
-    server = Server(server_url(args.server), api_token(args.token))
+    server = Server(server_url(args.server))
     check_server(server)
     items = [Item(i, source, tag=f"[{i}/{len(sources)}] " if many else "") for i, source in enumerate(sources, 1)]
     with tempfile.TemporaryDirectory(prefix="scribe-") as scratch:
@@ -468,7 +445,7 @@ def cmd_download(args) -> int:
 
 
 def cmd_status(args) -> int:
-    server = Server(server_url(args.server), api_token(args.token))
+    server = Server(server_url(args.server))
     print(json.dumps(server.call("GET", "/api/status"), indent=2))
     return OK
 
@@ -483,7 +460,6 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
         if server:
             sub.add_argument("--server", help="scribe server URL (default $SCRIBE_URL or http://127.0.0.1:8787)")
-            sub.add_argument("--token", help="API token (default $SCRIBE_API_TOKEN or the secrets file)")
 
     def episode_flag(sub):
         sub.add_argument("--episode", type=int, default=1, metavar="N", help="of a show or feed: the Nth newest episode (default 1, the newest)")

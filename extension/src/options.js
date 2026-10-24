@@ -28,8 +28,9 @@ form.addEventListener('submit', async (event) => {
     return
   }
   await chrome.storage.local.set(settings)
+  await chrome.storage.local.remove('token') // from before the server needed none
   try {
-    const status = await new ScribeClient(settings.server, settings.token).status()
+    const status = await new ScribeClient(settings.server).status()
     result.textContent = `Saved. Connected: active model ${status.active_model ?? 'none (pick one in the GUI)'}.`
   } catch (error) {
     result.textContent = `Saved, but the server did not answer: ${error.message}`

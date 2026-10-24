@@ -22,7 +22,6 @@ import { wer } from './wer.js'
 
 const FIXTURES = join(import.meta.dirname, 'fixtures')
 const SERVER = join(import.meta.dirname, '..', '..', 'server')
-const TOKEN = 'e2e-token'
 const [FIRST, SECOND] = (process.env.SCRIBE_E2E_MODELS ?? 'parakeet-tdt-0.6b-v2,whisper-large-v3-turbo').split(',')
 const JFK = 'And so my fellow Americans ask not what your country can do for you ask what you can do for your country'
 const LIBRI: Record<string, string> = JSON.parse(readFileSync(join(FIXTURES, 'librispeech.json'), 'utf8'))
@@ -44,7 +43,7 @@ async function freePort(): Promise<number> {
 async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await fetch(base + path, {
     method,
-    headers: { Authorization: `Bearer ${TOKEN}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${await response.text()}`)
@@ -95,7 +94,6 @@ beforeAll(async () => {
       SCRIBE_DATA_DIR: dataDir,
       // Share the installed models rather than downloading them again.
       SCRIBE_MODELS_DIR: process.env.SCRIBE_MODELS_DIR ?? join(homedir(), '.local', 'share', 'scribe', 'models'),
-      SCRIBE_API_TOKEN: TOKEN,
       SCRIBE_DEFAULT_MODEL: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -116,7 +114,7 @@ afterAll(() => {
 
 describe('replayed call -> bot pipeline -> scribe server', () => {
   it('transcribes two overlapping speakers, with a model swap mid-call', async () => {
-    const client = new ScribeClient(base, TOKEN)
+    const client = new ScribeClient(base)
     const session = await client.createSession('e2e call', 'guild', 'channel')
     const ada = 'ada-id'
     const bob = 'bob-id'
@@ -167,7 +165,7 @@ describe('replayed call -> bot pipeline -> scribe server', () => {
     expect(bobText.toLowerCase()).not.toContain('fellow americans')
     expect(said(ada).map((u) => u.text).join(' ').toLowerCase()).not.toContain('quilter')
 
-    const md = await (await fetch(`${base}/api/sessions/${session.id}/export?format=md`, { headers: { Authorization: `Bearer ${TOKEN}` } })).text()
+    const md = await (await fetch(`${base}/api/sessions/${session.id}/export?format=md`)).text()
     expect(md).toMatch(/\*\*\[00:00:0\d\] Ada:\*\* And so,? my fellow Americans/)
   })
 })

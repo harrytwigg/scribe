@@ -35,7 +35,7 @@ def client(tmp_path_factory):
     data = tmp_path_factory.mktemp("data")
     models_dir = Path(os.environ.get("SCRIBE_MODELS_DIR", "~/.local/share/scribe/models")).expanduser()
     settings = Settings(
-        hosts=["127.0.0.1"], port=0, data_dir=data, models_dir=models_dir, api_token=None,
+        hosts=["127.0.0.1"], port=0, data_dir=data, models_dir=models_dir,
         device="cuda", keep_audio=False, default_model="", queue_depth=32,
     )
     services = build(settings)

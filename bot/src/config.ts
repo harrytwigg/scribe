@@ -6,7 +6,6 @@ import { readFileSync } from 'node:fs'
 export interface Config {
   discordToken: string
   serverUrl: string
-  apiToken?: string
   /** Register slash commands in this guild only (instant), instead of globally. */
   guildId?: string
   /** Echo transcript lines into the voice channel's chat. Off by default (docs/spec.md, 3.2). */
@@ -31,7 +30,6 @@ export function loadConfig(env = process.env): Config {
   return {
     discordToken,
     serverUrl: env.SCRIBE_SERVER_URL || 'http://127.0.0.1:8787',
-    apiToken: secret('SCRIBE_API_TOKEN', secrets),
     guildId: env.SCRIBE_GUILD_ID || undefined,
     echo: flag(env.SCRIBE_ECHO),
     publicUrl: env.SCRIBE_PUBLIC_URL || undefined,

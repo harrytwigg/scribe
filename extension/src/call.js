@@ -8,14 +8,14 @@ const HEARTBEAT_MS = 30_000
 
 export class Call {
   /**
-   * @param {{server: string, token: string, myName: string, othersName: string, separateSpeakers?: boolean}} config
+   * @param {{server: string, myName: string, othersName: string, separateSpeakers?: boolean}} config
    * @param {(status: object) => void} report
    */
   constructor(config, report, { idleStopMs = 10 * 60_000 } = {}) {
     this.idleStopMs = idleStopMs
     this.config = config
     this.report = report
-    this.client = new ScribeClient(config.server, config.token)
+    this.client = new ScribeClient(config.server)
     this.contexts = []
     this.inflight = new Set()
     this.lines = 0
