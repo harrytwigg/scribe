@@ -487,7 +487,7 @@ def create_app(services: Services) -> FastAPI:
         try:
             turns = await on_worker(
                 cpu("upload_worker"),
-                lambda: diarizer.whole(audio, speakers, cancel) if speakers else diarizer.whole(audio, cancel=cancel),
+                lambda: diarizer.whole(audio, speakers, cancel),
             )
         except asyncio.CancelledError:
             cancel.set()  # a cancelled job stops its work in the separator, not only waiting for it

@@ -514,18 +514,18 @@ class Diarizer:
         """Turns of a whole recording, speakers numbered 1.. in order of first appearance.
 
         The clusterer finds as many speakers as it likes and the scraps among them join the real
-        ones (`absorb_scraps`). `num_speakers`, if the caller knows it, then merges the closest
-        voices until that many remain (`merge_down`; sherpa's own fixed-count clustering gave one
-        huge speaker and one of seconds on a real podcast). Setting the `cancel` event (a threading.Event) stops the work, and frees
-        the CPU it was using.
+        ones (`absorb_scraps`). `num_speakers`, if the caller knows it, is the most it ends with:
+        scraps are not folded below it, fewer than it are clustered again more finely, and more
+        are merged, closest voices first (`merge_down`). sherpa's own fixed-count clustering gave
+        one huge speaker and one of seconds on a real podcast. Setting the `cancel` event (a
+        threading.Event) stops the work and frees the CPU it was using.
         """
         with self._whole_lock:
             voice = lambda clip: self.voice(clip, live=False, cancel=cancel)  # noqa: E731
             turns = self._turns(audio, cancel=cancel)
             if num_speakers and len({t.label for t in turns}) < num_speakers:
-                # Fewer than said: cluster again more finely (more speakers than that, then merged down).
-                turns = self._turns(audio, threshold=WHOLE_SPLIT_THRESHOLD, cancel=cancel)
-            turns = absorb_scraps(turns, audio, voice)
+                turns = self._turns(audio, threshold=WHOLE_SPLIT_THRESHOLD, cancel=cancel)  # finer
+            turns = absorb_scraps(turns, audio, voice, floor=num_speakers or 1)
             if num_speakers:
                 turns = merge_down(turns, audio, voice, num_speakers)
         numbers: dict[int, int] = {}
@@ -546,6 +546,8 @@ def speaker_voice(turns: list[Turn], audio: np.ndarray, label: int, voice) -> np
         return None
     try:
         vector = np.asarray(voice(clip), dtype=np.float32)
+    except Cancelled:
+        raise  # the job was cancelled: stop, do not carry on placing speakers by time
     except Exception:  # a voice that cannot be measured is placed by time instead
         log.exception("measuring a speaker's voice failed")
         return None
@@ -557,11 +559,12 @@ def _nearest_in_time(turn: Turn, among: list[Turn]) -> int:
     return min(among, key=lambda k: max(k.start - turn.end, turn.start - k.end, 0.0)).label
 
 
-def absorb_scraps(turns: list[Turn], audio: np.ndarray, voice) -> list[Turn]:
+def absorb_scraps(turns: list[Turn], audio: np.ndarray, voice, floor: int = 1) -> list[Turn]:
     """Fold the clusterer's scrap speakers (see SCRAP_S) into the speakers they sound like.
 
     `voice(clip)` is a speaker embedding. A scrap whose voice cannot be measured (under half a
-    second of audio) goes to whoever is speaking nearest to it in time.
+    second of audio) goes to whoever is speaking nearest to it in time. Folding stops when `floor`
+    speakers remain (the count the caller asked for), smallest scraps first.
     """
     seconds: dict[int, float] = {}
     for turn in turns:
@@ -571,21 +574,26 @@ def absorb_scraps(turns: list[Turn], audio: np.ndarray, voice) -> list[Turn]:
     total = sum(seconds.values())
     keep = {label for label, sec in seconds.items() if sec / total >= SCRAP_SHARE}
     keep.add(max(seconds, key=lambda label: seconds[label]))  # somebody has to be the speaker
-    scraps = [label for label in seconds if label not in keep]
-    if not scraps:
+    scraps = sorted((label for label in seconds if label not in keep), key=lambda label: seconds[label])
+    if not scraps or len(seconds) <= floor:
         return turns
 
     known = {label: v for label in keep if (v := speaker_voice(turns, audio, label, voice)) is not None}
     kept_turns = [t for t in turns if t.label in keep]
     move: dict[int, int] = {}
+    remaining = len(seconds)
     for label in scraps:
+        if remaining <= floor:
+            break
         mine = speaker_voice(turns, audio, label, voice)
         if mine is None or not known:
             move[label] = -1  # by time, turn by turn
+            remaining -= 1
             continue
         best = max(known, key=lambda k: float(mine @ known[k]))
         if seconds[label] < SCRAP_S or float(mine @ known[best]) >= MATCH:
             move[label] = best
+            remaining -= 1
 
     def relabelled(turn: Turn) -> int:
         target = move.get(turn.label, turn.label)
@@ -609,7 +617,7 @@ def merge_down(turns: list[Turn], audio: np.ndarray, voice, count: int) -> list[
     groups: dict[int, set[int]] = {label: {label} for label in measured}  # merged label -> its parts
     weight = {label: seconds[label] for label in measured}
     centre = dict(measured)
-    while len(groups) > max(count, 1):
+    while len(groups) > count:
         a, b = max(
             ((x, y) for x in groups for y in groups if x < y), key=lambda pair: float(centre[pair[0]] @ centre[pair[1]])
         )

@@ -310,9 +310,12 @@ utterance `diarize` (the extension does, for the tab channel only).
   there are, `speakers` (API, 1 to 20; GUI "How many?"; CLI `--num-speakers`) merges the closest
   voices (`merge_down`) until that many remain, after the scraps; if the first pass found fewer, it
   clusters again more finely (threshold 0.5) first. sherpa's own fixed-count clustering is not used: on
-  a real podcast it gave one speaker of 680 s and one of seconds. Live calls are not affected: their
-  book already
-  merges speakers. Thresholds: `SCRIBE_DIARIZE_SCRAP_S`, `SCRIBE_DIARIZE_SCRAP_SHARE`.
+  a real podcast it gave one speaker of 680 s and one of seconds. Scraps are not folded below the
+  count, and the count is a maximum: a recording with fewer distinct voices ends with fewer. The finer
+  second pass roughly doubles the separation time. A speaker under 15 s of speech in a recording where
+  they hold under 5% is folded into the nearest voice whatever it sounds like (a guest's one-liner is
+  lost unless the count says to keep them). Live calls are not affected: their book already merges
+  speakers. Thresholds: `SCRIBE_DIARIZE_SCRAP_S`, `SCRIBE_DIARIZE_SCRAP_SHARE`.
 - **Its own processes.** sherpa-onnx holds Python's global lock for the whole of a call: measured,
   4 minutes of audio froze every thread of the server for 19 s, and an hour-long recording froze it
   (the dashboard, History, the Discord bot's posts) for minutes. So the models run in two child

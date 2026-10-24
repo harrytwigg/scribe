@@ -2,6 +2,7 @@
 fake diarizer that tells voices apart by pitch."""
 
 import numpy as np
+import pytest
 
 from scribe_server.audio import RATE
 from scribe_server.diarize import DiarizerSlot, SpeakerBook, Turn, tidy
@@ -241,7 +242,7 @@ def test_a_failing_diarizer_never_loses_speech(tmp_path):
         def turns(self, audio, book):
             raise RuntimeError("model exploded")
 
-        def whole(self, audio, cancel=None):
+        def whole(self, audio, num_speakers=None, cancel=None):
             raise RuntimeError("model exploded")
 
     h.services.diarization = DiarizerSlot(Broken())
@@ -283,7 +284,7 @@ def test_diarized_upload_numbers_speakers_without_gaps(tmp_path):
     h = diarized(tmp_path)
     # Speaker 2's turn is silence: it transcribes to nothing and is dropped; speaker 3 becomes 2.
     audio = np.concatenate([pitch(300, 2), silence(2), pitch(1100, 2)])
-    h.services.diarization.value.whole = lambda a, cancel=None: [(Turn(0, 2, 0), 1), (Turn(2, 4, 1), 2), (Turn(4, 6, 2), 3)]
+    h.services.diarization.value.whole = lambda a, n=None, cancel=None: [(Turn(0, 2, 0), 1), (Turn(2, 4, 1), 2), (Turn(4, 6, 2), 3)]
     r = h.client.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
                       files={"file": ("a.wav", wav(audio))}).json()
     assert [seg["speaker"] for seg in r["segments"]] == ["Speaker 1", "Speaker 2"] and r["speakers"] == 2
@@ -334,7 +335,7 @@ def test_words_go_to_the_turn_they_fall_in(tmp_path, monkeypatch):
 
 def test_a_diarized_upload_with_no_turns_is_still_transcribed(tmp_path):
     h = diarized(tmp_path)
-    h.services.diarization.value.whole = lambda audio, cancel=None: []  # pyannote heard nothing; VAD and ASR do
+    h.services.diarization.value.whole = lambda audio, n=None, cancel=None: []  # pyannote heard nothing; VAD and ASR do
     r = h.client.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
                       files={"file": ("a.wav", wav(pitch(300, 2)))}).json()
     assert r["text"] == "Speaker 1: alpha: 2.0s" and r["speakers"] == 1
@@ -473,7 +474,7 @@ def test_merging_down_places_a_voice_it_cannot_measure_by_time():
     assert {t.label for t in out} == {1, 2}
 
 
-def whole_with(monkeypatch, first, second, count):
+def whole_with(first, second, count):
     """`whole` over a stub clusterer: the labels found in a first pass and, at the finer threshold, a second."""
     seen = {"thresholds": []}
 
@@ -493,12 +494,44 @@ def whole_with(monkeypatch, first, second, count):
     return seen["thresholds"], sorted({n for _, n in out})
 
 
-def test_a_known_count_clusters_finer_only_if_fewer_speakers_were_found(monkeypatch):
+def test_a_known_count_clusters_finer_only_if_fewer_speakers_were_found():
     from scribe_server.diarize import WHOLE_SPLIT_THRESHOLD
 
-    thresholds, speakers = whole_with(monkeypatch, [0, 0, 0, 0], [0, 1, 0, 1], 2)
+    thresholds, speakers = whole_with([0, 0, 0, 0], [0, 1, 0, 1], 2)
     assert thresholds == [None, WHOLE_SPLIT_THRESHOLD] and speakers == [1, 2]  # found 1, told 2: a finer pass
-    thresholds, _ = whole_with(monkeypatch, [0, 1, 0, 1], [0, 1, 2, 3], 2)
+    thresholds, _ = whole_with([0, 1, 0, 1], [0, 1, 2, 3], 2)
     assert thresholds == [None]  # found 2, told 2: nothing more to do
-    thresholds, _ = whole_with(monkeypatch, [0, 1, 0, 1], [0, 1, 2, 3], None)
+    thresholds, _ = whole_with([0, 1, 0, 1], [0, 1, 2, 3], None)
     assert thresholds == [None]  # not told: as found
+
+
+def test_a_known_count_stops_the_folding_at_that_count():
+    from scribe_server.diarize import absorb_scraps
+
+    # Two big speakers and one real 10 s voice (3% of 330 s): folded when nobody said how many ...
+    audio, turns = conversation((300, 160, 1), (700, 160, 2), (500, 10, 3))
+    voice = lambda clip: FakeDiarizer.voice(band_of(clip))  # noqa: E731
+    assert {t.label for t in absorb_scraps(turns, audio, voice)} == {1, 2}
+    # ... kept when told there are three, and the same scrap still folds when told there are two.
+    assert {t.label for t in absorb_scraps(turns, audio, voice, floor=3)} == {1, 2, 3}
+    assert {t.label for t in absorb_scraps(turns, audio, voice, floor=2)} == {1, 2}
+
+
+def test_a_known_count_through_whole_never_ends_with_fewer_than_found_scraps_allow():
+    thresholds, speakers = whole_with([0, 1, 2], [0, 1, 2], 3)  # found 3, told 3
+    assert thresholds == [None] and speakers == [1, 2, 3]
+
+
+def test_a_cancel_stops_the_folding_instead_of_placing_speakers_by_time():
+    from scribe_server.diarize import Cancelled, absorb_scraps
+
+    calls = []
+
+    def voice(clip):
+        calls.append(1)
+        raise Cancelled("cancelled")
+
+    audio, turns = conversation((300, 160, 1), (700, 160, 2), (500, 10, 3))
+    with pytest.raises(Cancelled):
+        absorb_scraps(turns, audio, voice)
+    assert len(calls) == 1  # no more voices measured (and no respawned child) after the cancel

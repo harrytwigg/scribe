@@ -327,7 +327,7 @@ def test_cancelling_a_job_stops_its_work_in_the_separator(tmp_path):
     seen = {}
 
     class Slow(FakeDiarizer):
-        def whole(self, audio, cancel=None):
+        def whole(self, audio, num_speakers=None, cancel=None):
             seen["started"] = True
             seen["stopped"] = cancel.wait(10)  # a real separator would be busy for minutes
             raise RuntimeError("cancelled")
