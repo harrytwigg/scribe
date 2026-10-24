@@ -300,6 +300,17 @@ utterance `diarize` (the extension does, for the tab channel only).
   Discord users included.
 - **Whole recordings.** "Try it" (and `/v1/audio/transcriptions` with `diarize=true`) diarizes an
   upload in one pass and returns `segments` with speakers.
+- **Its own processes.** sherpa-onnx holds Python's global lock for the whole of a call: measured,
+  4 minutes of audio froze every thread of the server for 19 s, and an hour-long recording froze it
+  (the dashboard, History, the Discord bot's posts) for minutes. So the models run in two child
+  processes (`diarize.py`, `Diarizer(isolated=True)`, the default): one for whole recordings, one for
+  live calls, so a long upload still never holds up a call. They are started with `spawn`, loaded
+  once at start (`/api/status` shows `diarization: loading` until both are up), run at a lower
+  priority (nice 10), and take audio over shared memory when it is over a minute long. If one dies
+  (killed for memory, say) that call falls back to one speaker like any diarization failure, and the
+  next call starts a new process. The tests hold the lock on purpose with a stand-in model
+  (`tests/test_diarize_process.py`): the in-process control stalls for the full call, the isolated
+  one does not.
 - **Measured** (tests/test_diarize_gpu.py and a scratch stress test): a 42 s three-speaker
   LibriSpeech conversation, live in two utterances, put every turn on the right, consistent
   speaker. So did a whole-file pass (5 s of CPU for 42 s of audio). Four male speakers taking 16

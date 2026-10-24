@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +33,21 @@ from .worker import GpuWorker, QueueFull
 
 log = logging.getLogger("scribe.app")
 STATIC = Path(__file__).parent / "static"
+# The Chrome extension, next to server/ in a checkout and in the deployed copy (deploy/install.sh).
+EXTENSION = Path(__file__).resolve().parents[2] / "extension"
+
+
+def extension_zip(folder: Path) -> bytes | None:
+    """The extension as a zip to unpack and load, or None if this install has no extension folder.
+    Only what Chrome runs: the manifest and src/, not the tests."""
+    if not (folder / "manifest.json").is_file():
+        return None
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zip_:
+        for path in sorted([folder / "manifest.json", *(folder / "src").rglob("*")]):
+            if path.is_file():
+                zip_.write(path, path.relative_to(folder).as_posix())
+    return out.getvalue()
 
 
 @dataclass
@@ -204,6 +221,8 @@ def create_app(services: Services) -> FastAPI:
         task = asyncio.create_task(loop())
         yield
         task.cancel()
+        if close := getattr(s.diarization.value, "close", None):
+            close()  # the speaker separation processes
 
     app = FastAPI(title="scribe", docs_url=None, redoc_url=None, lifespan=lifespan)
     hub = Hub()
@@ -463,8 +482,12 @@ def create_app(services: Services) -> FastAPI:
         """Who spoke when, with the text of each turn: `segments`, `text`, `model`, `duration`,
         `asr_ms` and `speakers`. Raises HTTPException when the GPU queue is full."""
         started = time.monotonic()
+        cancel = threading.Event()
         try:
-            turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio))
+            turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio, cancel=cancel))
+        except asyncio.CancelledError:
+            cancel.set()  # a cancelled job stops its work in the separator, not only waiting for it
+            raise
         except HTTPException:
             raise
         except Exception:
@@ -996,6 +1019,18 @@ def create_app(services: Services) -> FastAPI:
     def set_optout(body: OptOut) -> dict:
         s.store.set_optout(body.source, body.user_id, body.opted_out)
         return {"ok": True}
+
+    # -- Chrome extension -----------------------------------------------------------------------
+
+    @app.get("/api/extension.zip", dependencies=[Depends(guard)])
+    def download_extension() -> Response:
+        """The Chrome extension (extension/), to unzip and load unpacked on any machine."""
+        body = extension_zip(EXTENSION)
+        if body is None:
+            raise HTTPException(404, "this install has no extension folder")
+        return Response(
+            body, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="scribe-extension.zip"'}
+        )
 
     # -- GUI ------------------------------------------------------------------------------------
 

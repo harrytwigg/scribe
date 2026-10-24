@@ -13,11 +13,15 @@ Discord needs none of this: it delivers each user's audio separately.
 """
 
 import logging
+import multiprocessing
 import os
 import tarfile
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass, field
+from functools import partial
+from multiprocessing import shared_memory
 from pathlib import Path
 
 import numpy as np
@@ -149,32 +153,40 @@ def _fetch(url: str, dest: Path) -> None:
     partial.replace(dest)
 
 
-class Diarizer:
-    """sherpa-onnx diarization and speaker embeddings. Thread-safe: live calls (`turns`) and whole
-    recordings (`whole`) use separate models and locks, so a long upload never holds up a call."""
+def fetch_models(models_dir: Path) -> Path:
+    """Download the segmentation and embedding models on first use (~45 MB); returns their folder."""
+    folder = models_dir / "_diarization"
+    folder.mkdir(parents=True, exist_ok=True)
+    segmentation = folder / "pyannote-segmentation-3.0.onnx"
+    embedding = folder / "nemo_en_titanet_small.onnx"
+    if not segmentation.exists():
+        archive = folder / "segmentation.tar.bz2"
+        _fetch(SEGMENTATION_URL, archive)
+        with tarfile.open(archive) as tar:
+            member = next(m for m in tar.getmembers() if m.name.endswith("/model.onnx"))
+            source = tar.extractfile(member)
+            assert source is not None
+            partial = segmentation.with_suffix(".partial")
+            partial.write_bytes(source.read())
+            partial.replace(segmentation)
+        archive.unlink()
+    if not embedding.exists():
+        _fetch(EMBEDDING_URL, embedding)
+    return folder
 
-    def __init__(self, models_dir: Path, threads: int = 8):
+
+class Sherpa:
+    """The sherpa-onnx models and nothing else: raw turns and voice embeddings. Its calls hold
+    Python's global lock for as long as they run (a minute or more for a long recording), so the
+    server runs them in child processes (`Diarizer`, `isolated`), never next to the web server."""
+
+    def __init__(self, models_dir: Path, threads: int = 8, role: str = "both"):
+        """`role`: "recordings" or "calls" load only the clusterer that child uses; "both" loads each."""
         import sherpa_onnx
 
-        folder = models_dir / "_diarization"
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = fetch_models(models_dir)
         segmentation = folder / "pyannote-segmentation-3.0.onnx"
         embedding = folder / "nemo_en_titanet_small.onnx"
-        if not segmentation.exists():
-            archive = folder / "segmentation.tar.bz2"
-            _fetch(SEGMENTATION_URL, archive)
-            with tarfile.open(archive) as tar:
-                member = next(m for m in tar.getmembers() if m.name.endswith("/model.onnx"))
-                source = tar.extractfile(member)
-                assert source is not None
-                partial = segmentation.with_suffix(".partial")
-                partial.write_bytes(source.read())
-                partial.replace(segmentation)
-            archive.unlink()
-        if not embedding.exists():
-            _fetch(EMBEDDING_URL, embedding)
-
-        self._sherpa = sherpa_onnx
         self._embedding_config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(embedding), num_threads=threads)
         self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(self._embedding_config)
 
@@ -197,20 +209,258 @@ class Diarizer:
         # found the right speaker count on the test conversation (0.5 split speakers). For live
         # utterances it is set to over-split instead: the session's book merges the pieces back,
         # while a merge here (a short turn lumped in with the next speaker) cannot be undone.
-        self._whole = diarizer(0.8)
-        self._live = diarizer(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3")))
-        self._live_lock = threading.Lock()
-        self._whole_lock = threading.Lock()
+        self._whole = diarizer(0.8) if role in ("recordings", "both") else None
+        self._live = (
+            diarizer(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3"))) if role in ("calls", "both") else None
+        )
 
-    def _turns(self, audio: np.ndarray, live: bool = False) -> list[Turn]:
+    def turns(self, audio: np.ndarray, live: bool) -> list[tuple[float, float, int]]:
         result = (self._live if live else self._whole).process(audio).sort_by_start_time()
-        return tidy([Turn(s.start, s.end, s.speaker) for s in result])
+        return [(s.start, s.end, s.speaker) for s in result]
 
     def voice(self, audio: np.ndarray) -> np.ndarray:
         stream = self._extractor.create_stream()
         stream.accept_waveform(RATE, audio)
         stream.input_finished()
         return np.array(self._extractor.compute(stream), dtype=np.float32)
+
+
+# -- child processes -----------------------------------------------------------------------------
+# One for live calls and one for whole recordings, as the two used to have their own models and
+# locks: a long upload never holds up a call. Each loads its models once, at start.
+
+
+class Cancelled(RuntimeError):
+    pass
+
+
+def _watch_parent(parent_pid: int) -> None:
+    """A child should not outlive the server, even one that was killed outright. This is a Python
+    thread, and a sherpa call holds the global lock, so a child that is busy exits when its call
+    ends, not at once (systemd's KillMode=control-group, the default, stops it sooner). PDEATHSIG
+    would be immediate, but it fires when the *thread* that started the child exits, and the
+    children are started from a loader thread that does."""
+    while True:
+        time.sleep(2)
+        if os.getppid() != parent_pid:
+            os._exit(1)
+
+
+def _child_main(conn, factory, nice: int, parent_pid: int) -> None:
+    """The child process: load the models, say so (or why not), then answer calls until told to stop."""
+    try:
+        if nice:
+            os.nice(nice)  # the web server and the GPU feed come first when the machine is busy
+        models = factory()
+    except BaseException as error:
+        conn.send(("error", f"{type(error).__name__}: {error}"))
+        return
+    threading.Thread(target=_watch_parent, args=(parent_pid,), daemon=True).start()
+    conn.send(("ok", None))
+    while True:
+        try:
+            message = conn.recv()
+        except EOFError:
+            return
+        if message is None:
+            return
+        op, args = message
+        try:
+            if op == "ping":
+                result = True
+            elif op == "turns":
+                audio, live, *rest = args
+                result = models.turns(_open(audio), live, *rest)
+            elif op == "voice":
+                result = models.voice(_open(args[0]))
+            else:
+                raise ValueError(f"unknown call {op!r}")
+            conn.send(("ok", result))
+        except BaseException as error:  # the caller gets the reason; the process carries on
+            conn.send(("error", f"{type(error).__name__}: {error}"))
+
+
+# Audio of at least this many samples goes to a child through shared memory instead of a pipe:
+# a recording of hours is hundreds of MB, and sending it would copy it twice over.
+SHARE_FROM = RATE * 60
+
+
+def _share(audio: np.ndarray):
+    """The audio as something a child opens with `_open`: itself if small, else a shared block."""
+    if len(audio) < SHARE_FROM:
+        return audio, None
+    block = shared_memory.SharedMemory(create=True, size=audio.nbytes)
+    np.ndarray(audio.shape, audio.dtype, buffer=block.buf)[:] = audio
+    return (block.name, audio.shape, audio.dtype.str), block
+
+
+def _open(audio) -> np.ndarray:
+    if isinstance(audio, np.ndarray):
+        return audio
+    name, shape, dtype = audio
+    block = shared_memory.SharedMemory(name=name)
+    try:
+        return np.ndarray(shape, np.dtype(dtype), buffer=block.buf).copy()
+    finally:
+        block.close()
+
+
+class ChildProcess:
+    """One worker process that runs calls one at a time, with its models loaded at start.
+
+    A call fails with `RuntimeError` if the process dies (killed for memory, say), and with
+    `Cancelled` if its `cancel` event is set, which kills the process to stop the work. The next
+    call starts a new one. After `close()` nothing is left running and nothing restarts.
+    """
+
+    def __init__(self, factory, name: str, nice: int = 0):
+        self._factory, self._name, self._nice = factory, name, nice
+        self._calls = threading.Lock()  # one call at a time
+        self._state = threading.Lock()  # guards what follows, never held while waiting on the child
+        self._process = None
+        self._conn = None
+        self._closed = False
+
+    def _ensure(self):
+        with self._state:
+            if self._closed:
+                raise RuntimeError(f"the {self._name} process is shut down")
+            if self._process is not None and self._process.is_alive():
+                return self._process, self._conn, False
+            context = multiprocessing.get_context("spawn")  # not fork: threads, CUDA, an event loop here
+            mine, theirs = context.Pipe()
+            process = context.Process(
+                target=_child_main, args=(theirs, self._factory, self._nice, os.getpid()), name=self._name, daemon=True
+            )
+            process.start()
+            theirs.close()
+            self._process, self._conn = process, mine
+            return process, mine, True
+
+    def _discard(self, process) -> None:
+        """Stop `process` (if it still runs) and forget it."""
+        conn = None
+        with self._state:
+            if self._process is process:
+                self._process, conn, self._conn = None, self._conn, None
+        process.terminate()
+        process.join(2)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        if conn is not None:
+            conn.close()
+
+    def _receive(self, process, conn, cancel):
+        """The child's next message, polling so a `cancel` is noticed. A pipe that is closed or at
+        its end means the process is gone (a dead process's end reads as EOF)."""
+        while True:
+            try:
+                if conn.poll(0.2):
+                    return conn.recv()
+            except (EOFError, OSError):
+                self._discard(process)
+                with self._state:
+                    closed = self._closed
+                if closed:
+                    raise RuntimeError(f"the {self._name} process is shut down") from None
+                log.error("the %s process died (exit code %s)", self._name, process.exitcode)
+                raise RuntimeError(f"the {self._name} process died") from None
+            if cancel is not None and cancel.is_set():
+                self._discard(process)
+                raise Cancelled("cancelled")
+
+    def _exchange(self, op: str, args: tuple, cancel):
+        with self._calls:
+            process, conn, fresh = self._ensure()
+            if fresh:  # a new process answers once its models are loaded, or says why they would not
+                kind, value = self._receive(process, conn, cancel)
+                if kind == "error":
+                    self._discard(process)
+                    raise RuntimeError(f"the {self._name} process could not start: {value}")
+            try:
+                conn.send((op, args))
+            except (OSError, ValueError):
+                pass  # it died between the check and the send: _receive reports it
+            kind, value = self._receive(process, conn, cancel)
+            if kind == "error":
+                raise RuntimeError(f"{self._name}: {value}")
+            return value
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid if self._process is not None else None
+
+    def start(self) -> None:
+        """Start the process and wait until its models have loaded."""
+        self._exchange("ping", (), None)
+
+    def call(self, op: str, *args, cancel=None):
+        return self._exchange(op, args, cancel)
+
+    def close(self) -> None:
+        with self._state:
+            self._closed = True
+            process = self._process
+        if process is not None:
+            self._discard(process)
+
+
+class Diarizer:
+    """sherpa-onnx diarization and speaker embeddings. Thread-safe: live calls (`turns`) and whole
+    recordings (`whole`) use separate models and locks, so a long upload never holds up a call.
+
+    `isolated` (the default) runs the models in child processes. sherpa-onnx holds Python's global
+    lock for a whole call, so in this process one recording would freeze every request, the
+    dashboard's included, until it was done.
+    """
+
+    def __init__(self, models_dir: Path, threads: int = 8, isolated: bool = True, factory=None):
+        """`factory(role)` builds the models (a `Sherpa`); a test passes a stand-in."""
+        if factory is None:
+            fetch_models(models_dir)  # once, here, not in both children at the same time
+            factory = partial(Sherpa, models_dir, threads)
+        self._sherpa = None
+        self._whole_process = self._live_process = None
+        if isolated:
+            # Recordings run niced: the web server and live calls come first when the machine is busy.
+            self._whole_process = ChildProcess(partial(factory, "recordings"), "speaker separation (recordings)", nice=10)
+            self._live_process = ChildProcess(partial(factory, "calls"), "speaker separation (calls)")
+            try:
+                for process in (self._whole_process, self._live_process):
+                    process.start()
+            except BaseException:
+                self.close()  # not the first child left running with nobody to stop it
+                raise
+        else:
+            self._sherpa = factory("both")
+        self._live_lock = threading.Lock()
+        self._whole_lock = threading.Lock()
+
+    def close(self) -> None:
+        """Stop the child processes, busy or not. Nothing restarts them."""
+        for process in (self._whole_process, self._live_process):
+            if process is not None:
+                process.close()
+
+    def _call(self, live: bool, local, op: str, audio: np.ndarray, *args, cancel=None):
+        if self._sherpa is not None:
+            return local(audio)
+        shared, block = _share(audio)
+        try:
+            process = self._live_process if live else self._whole_process
+            return process.call(op, shared, *args, cancel=cancel)
+        finally:
+            if block is not None:
+                block.close()
+                block.unlink()
+
+    def _turns(self, audio: np.ndarray, live: bool = False, cancel=None) -> list[Turn]:
+        raw = self._call(live, lambda a: self._sherpa.turns(a, live), "turns", audio, live, cancel=cancel)
+        return tidy([Turn(start, end, label) for start, end, label in raw])
+
+    def voice(self, audio: np.ndarray, live: bool = True, cancel=None) -> np.ndarray:
+        return self._call(live, self._sherpa.voice if self._sherpa is not None else None, "voice", audio, cancel=cancel)
 
     def turns(self, audio: np.ndarray, book: SpeakerBook) -> list[tuple[Turn, Speaker]]:
         """Split one utterance into turns and name each turn's speaker from the session's book.
@@ -237,10 +487,13 @@ class Diarizer:
                 out.append((turn, speaker))
             return _merge_same_speaker(out)
 
-    def whole(self, audio: np.ndarray) -> list[tuple[Turn, int]]:
-        """Turns of a whole recording, speakers numbered 1.. in order of first appearance."""
+    def whole(self, audio: np.ndarray, cancel=None) -> list[tuple[Turn, int]]:
+        """Turns of a whole recording, speakers numbered 1.. in order of first appearance.
+
+        Setting the `cancel` event (a threading.Event) stops the work, and frees the CPU it was using.
+        """
         with self._whole_lock:
-            turns = self._turns(audio)
+            turns = self._turns(audio, cancel=cancel)
         numbers: dict[int, int] = {}
         return [(t, numbers.setdefault(t.label, len(numbers) + 1)) for t in turns]
 

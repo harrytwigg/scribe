@@ -37,7 +37,7 @@ class FakeDiarizer:
             pairs.append((turn, book.match(self.voice(turn.label), turn.duration)))
         return pairs
 
-    def whole(self, audio):
+    def whole(self, audio, cancel=None):
         numbers = {}
         return [(t, numbers.setdefault(t.label, len(numbers) + 1)) for t in self._turns(audio)]
 
@@ -241,7 +241,7 @@ def test_a_failing_diarizer_never_loses_speech(tmp_path):
         def turns(self, audio, book):
             raise RuntimeError("model exploded")
 
-        def whole(self, audio):
+        def whole(self, audio, cancel=None):
             raise RuntimeError("model exploded")
 
     h.services.diarization = DiarizerSlot(Broken())
@@ -283,7 +283,7 @@ def test_diarized_upload_numbers_speakers_without_gaps(tmp_path):
     h = diarized(tmp_path)
     # Speaker 2's turn is silence: it transcribes to nothing and is dropped; speaker 3 becomes 2.
     audio = np.concatenate([pitch(300, 2), silence(2), pitch(1100, 2)])
-    h.services.diarization.value.whole = lambda a: [(Turn(0, 2, 0), 1), (Turn(2, 4, 1), 2), (Turn(4, 6, 2), 3)]
+    h.services.diarization.value.whole = lambda a, cancel=None: [(Turn(0, 2, 0), 1), (Turn(2, 4, 1), 2), (Turn(4, 6, 2), 3)]
     r = h.client.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
                       files={"file": ("a.wav", wav(audio))}).json()
     assert [seg["speaker"] for seg in r["segments"]] == ["Speaker 1", "Speaker 2"] and r["speakers"] == 2
@@ -334,7 +334,7 @@ def test_words_go_to_the_turn_they_fall_in(tmp_path, monkeypatch):
 
 def test_a_diarized_upload_with_no_turns_is_still_transcribed(tmp_path):
     h = diarized(tmp_path)
-    h.services.diarization.value.whole = lambda audio: []  # pyannote heard nothing; VAD and ASR do
+    h.services.diarization.value.whole = lambda audio, cancel=None: []  # pyannote heard nothing; VAD and ASR do
     r = h.client.post("/v1/audio/transcriptions", data={"response_format": "verbose_json", "diarize": "true"},
                       files={"file": ("a.wav", wav(pitch(300, 2)))}).json()
     assert r["text"] == "Speaker 1: alpha: 2.0s" and r["speakers"] == 1

@@ -18,6 +18,10 @@ mkdir -p "$dest" "$units"
 rsync -a --delete --exclude .venv --exclude node_modules --exclude dist --exclude __pycache__ \
   --exclude .pytest_cache "$repo/server/" "$dest/server/"
 rsync -a --delete --exclude node_modules --exclude dist "$repo/bot/" "$dest/bot/"
+# The Chrome extension, at a path that outlives any checkout or worktree: Chrome drops an unpacked
+# extension whose folder is gone. Load it from here ("Load unpacked"); the server also serves it
+# as a zip (Extension tab) for other machines.
+rsync -a --delete --exclude node_modules "$repo/extension/" "$dest/extension/"
 
 # Reinstalling onnxruntime-gpu each time is cheap (uv's cache) and repairs a venv where the CPU
 # onnxruntime package, which shares its directory, was installed or removed over it.
