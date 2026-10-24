@@ -482,8 +482,12 @@ def create_app(services: Services) -> FastAPI:
         """Who spoke when, with the text of each turn: `segments`, `text`, `model`, `duration`,
         `asr_ms` and `speakers`. Raises HTTPException when the GPU queue is full."""
         started = time.monotonic()
+        cancel = threading.Event()
         try:
-            turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio))
+            turns = await on_worker(cpu("upload_worker"), lambda: diarizer.whole(audio, cancel=cancel))
+        except asyncio.CancelledError:
+            cancel.set()  # a cancelled job stops its work in the separator, not only waiting for it
+            raise
         except HTTPException:
             raise
         except Exception:

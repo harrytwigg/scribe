@@ -294,3 +294,34 @@ def test_cancelling_a_fetch_stops_the_download(harness):
         time.sleep(0.5)
         assert len(reads) == settled and settled < 100, "the download thread must stop, not run on to the end"
         assert c.get("/api/sessions").json() == []
+
+
+def test_cancelling_a_job_stops_its_work_in_the_separator(tmp_path):
+    import threading
+
+    seen = {}
+
+    class Slow(FakeDiarizer):
+        def whole(self, audio, cancel=None):
+            seen["started"] = True
+            seen["stopped"] = cancel.wait(10)  # a real separator would be busy for minutes
+            raise RuntimeError("cancelled")
+
+    h = Harness(tmp_path)
+    h.services.diarization = DiarizerSlot(Slow())
+    h.ready()
+    audio = np.concatenate([silence(0.5), pitch(300, 2), silence(0.5)])
+    try:
+        with h.client as c:
+            job_id = upload(c, audio, diarize="true").json()["id"]
+            deadline = time.monotonic() + 5
+            while not seen.get("started") and time.monotonic() < deadline:
+                time.sleep(0.02)
+            c.delete(f"/api/transcriptions/{job_id}")
+            assert wait(c, job_id)["status"] == "cancelled"
+            deadline = time.monotonic() + 5
+            while "stopped" not in seen and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert seen["stopped"] is True  # the cancel event reached the separator
+    finally:
+        h.worker.stop()
