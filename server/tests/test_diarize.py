@@ -37,7 +37,7 @@ class FakeDiarizer:
             pairs.append((turn, book.match(self.voice(turn.label), turn.duration)))
         return pairs
 
-    def whole(self, audio):
+    def whole(self, audio, num_speakers=None):
         numbers = {}
         return [(t, numbers.setdefault(t.label, len(numbers) + 1)) for t in self._turns(audio)]
 
@@ -376,3 +376,85 @@ def test_a_retry_while_the_first_attempt_is_diarizing_waits_for_it(tmp_path):
     assert len(runs) == 1
     assert [l["id"] for l in first.json()["lines"]] == [l["id"] for l in retry.json()["lines"]]
     assert {sid_: w for sid_, _, w in h.services.store.voices(sid, "tab#")} == {"tab#1": 2.5, "tab#2": 2.5}
+
+
+# -- whole recordings: scraps are folded into the real speakers ---------------------------------
+
+
+def band_of(clip) -> int:
+    return int(np.fft.rfftfreq(len(clip), 1 / RATE)[np.abs(np.fft.rfft(clip)).argmax()] // 100)
+
+
+def conversation(*parts):
+    """(audio, turns) for consecutive stretches (hz, seconds, label), a gap between each."""
+    audio, turns, at = [], [], 0.0
+    for hz, seconds, label in parts:
+        audio += [pitch(hz, seconds), silence(1)]
+        turns.append(Turn(at, at + seconds, label))
+        at += seconds + 1
+    return np.concatenate(audio), turns
+
+
+def folded(parts):
+    from scribe_server.diarize import absorb_scraps
+
+    audio, turns = conversation(*parts)
+    out = absorb_scraps(turns, audio, lambda clip: FakeDiarizer.voice(band_of(clip)))
+    return sorted({t.label for t in out}), out
+
+
+def test_a_scrap_that_sounds_like_a_speaker_joins_them():
+    # Two real speakers (about 100 s each) and two scraps: one in the host's voice (300 Hz band),
+    # one in nobody's. Both are under 15 s, so both join someone.
+    labels, out = folded([(300, 100, 1), (700, 100, 2), (300, 4, 3), (900, 3, 4), (300, 50, 1), (700, 50, 2)])
+    assert labels == [1, 2]
+    assert [t.label for t in out if t.start == 202] == [1]  # the 300 Hz scrap is the host again
+
+
+def test_a_real_third_voice_with_a_minute_of_speech_stays():
+    # 18 s of a different voice is under 5% of 400 s but over 15 s, and it sounds like nobody else.
+    labels, _ = folded([(300, 190, 1), (700, 190, 2), (500, 18, 3)])
+    assert labels == [1, 2, 3]
+
+
+def test_a_longer_scrap_that_sounds_like_a_speaker_joins_them():
+    labels, _ = folded([(300, 190, 1), (700, 190, 2), (305, 18, 3)])
+    assert labels == [1, 2]
+
+
+def test_one_speaker_or_two_balanced_speakers_are_left_alone():
+    assert folded([(300, 60, 1)])[0] == [1]
+    assert folded([(300, 60, 1), (700, 50, 2), (300, 50, 1)])[0] == [1, 2]
+
+
+def test_a_scrap_whose_voice_cannot_be_measured_goes_to_the_speaker_beside_it():
+    from scribe_server.diarize import absorb_scraps
+
+    def voice(clip):
+        if band_of(clip) == 5:
+            raise RuntimeError("no voice in that")
+        return FakeDiarizer.voice(band_of(clip))
+
+    audio, turns = conversation((300, 100, 1), (700, 100, 2), (500, 3, 3), (700, 50, 2))
+    out = absorb_scraps(turns, audio, voice)
+    assert {t.label for t in out} == {1, 2}
+    assert [t.label for t in out if abs(t.start - 202) < 0.01] == [2]  # between two stretches of 2
+
+
+def test_a_known_speaker_count_is_passed_on_and_skips_the_folding(monkeypatch):
+    seen = {}
+
+    class Counted(Diarizer):
+        def __init__(self):
+            self._whole_lock = threading.Lock()
+
+        def _turns(self, audio, live=False, num_speakers=None):
+            seen["n"] = num_speakers
+            return [Turn(0, 1, 0), Turn(1, 2, 1)]
+
+    monkeypatch.setattr("scribe_server.diarize.absorb_scraps", lambda turns, *a: [seen.setdefault("folded", True), turns][1])
+    d = Counted()
+    assert [n for _, n in d.whole(silence(2), num_speakers=2)] == [1, 2]
+    assert seen == {"n": 2}  # not folded
+    d.whole(silence(2))
+    assert seen["n"] is None and seen["folded"]

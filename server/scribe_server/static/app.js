@@ -600,7 +600,9 @@ $('#tx-form').addEventListener('submit', async (event) => {
   const links = $('#tx-links').value.split('\n').map((l) => l.trim()).filter(Boolean);
   if (!files.length && !links.length) return txMessage('Choose audio files or paste podcast links (one per line).');
   txMessage('', false);
-  const diarize = $('#tx-speakers').checked;
+  const count = Number.parseInt($('#tx-count').value, 10);
+  const speakers = count >= 1 ? { speakers: Math.min(count, 20) } : {}; // a known number implies separating
+  const diarize = $('#tx-speakers').checked || 'speakers' in speakers;
   $('#tx-file').value = ''; // sent below; the next batch starts from an empty form
   $('#tx-links').value = '';
   const started = [...links.map((link) => ({ link, item: txAdd(link) })), ...files.map((file) => ({ file, item: txAdd(file.name) }))];
@@ -611,9 +613,9 @@ $('#tx-form').addEventListener('submit', async (event) => {
     try {
       const job = link
         ? await api('/api/transcriptions/link', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: link, diarize }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: link, diarize, ...speakers }),
         })
-        : await uploadFile(item, file, { filename: file.name, diarize });
+        : await uploadFile(item, file, { filename: file.name, diarize, ...speakers });
       item.id = job.id;
       item.job = job;
       txWatch();

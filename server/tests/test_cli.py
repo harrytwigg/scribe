@@ -271,3 +271,21 @@ def test_a_weak_match_is_warned_about_even_when_quiet(served, monkeypatch, capsy
     fake_network(monkeypatch, {**spotify_pages(), "https://cdn.example.com/12.mp3": (AUDIO, "audio/wav")})
     code, _, err = run(capsys, "transcribe", f"https://open.spotify.com/episode/{EP}", "-q")
     assert code == 0 and "warning" not in err
+
+
+def test_num_speakers_is_sent_and_implies_speakers(served, tmp_path, capsys):
+    seen = []
+    from scribe_server.diarize import DiarizerSlot
+    from .test_diarize import FakeDiarizer
+
+    class Counting(FakeDiarizer):
+        def whole(self, audio, num_speakers=None):
+            seen.append(num_speakers)
+            return super().whole(audio, num_speakers)
+
+    served.services.diarization = DiarizerSlot(Counting())
+    path = tmp_path / "talk.wav"
+    path.write_bytes(AUDIO)
+    code, out, err = run(capsys, "transcribe", str(path), "--num-speakers", "2", "-q")
+    assert code == 0 and seen == [2]
+    assert run(capsys, "transcribe", str(path), "--num-speakers", "0")[0] == 2

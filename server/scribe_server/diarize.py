@@ -45,6 +45,14 @@ MIN_EMBED_S = 1.0
 # Only a turn this long can found a new speaker; a shorter unmatched one goes to the nearest known
 # speaker. Short turns are where same-speaker scores dip, and a split speaker is the worse error.
 MIN_FOUND_S = float(os.environ.get("SCRIBE_DIARIZE_MIN_FOUND", "2.0"))
+# Whole recordings: a speaker the clusterer found who spoke for less than SCRAP_S seconds, or less
+# than SCRAP_SHARE of the speech, is usually a scrap of someone else (a voice over music, a laugh,
+# the same person on a bad line), not a person. Under SCRAP_S it always joins the speaker it sounds
+# most like; between that and SCRAP_SHARE only if it sounds like them (MATCH), so a real third voice
+# who spoke for a minute stays. EMBED_CAP_S bounds the audio each speaker's voice is measured on.
+SCRAP_S = float(os.environ.get("SCRIBE_DIARIZE_SCRAP_S", "15"))
+SCRAP_SHARE = float(os.environ.get("SCRIBE_DIARIZE_SCRAP_SHARE", "0.05"))
+EMBED_CAP_S = 45.0
 # A turn shorter than this is merged into its neighbour: too short to transcribe alone.
 MIN_TURN_S = 0.5
 # Same-speaker turns closer than this are one turn.
@@ -190,29 +198,36 @@ class Sherpa:
         self._embedding_config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(embedding), num_threads=threads)
         self._extractor = sherpa_onnx.SpeakerEmbeddingExtractor(self._embedding_config)
 
-        def diarizer(threshold: float):
-            config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+        def config(threshold: float, clusters: int = -1):
+            made = sherpa_onnx.OfflineSpeakerDiarizationConfig(
                 segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
                     pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(segmentation)),
                     num_threads=threads,
                 ),
                 embedding=self._embedding_config,
-                clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=threshold),
+                clustering=sherpa_onnx.FastClusteringConfig(num_clusters=clusters, threshold=threshold),
                 min_duration_on=0.3,
                 min_duration_off=0.5,
             )
-            if not config.validate():
+            if not made.validate():
                 raise RuntimeError("invalid diarization config")
-            return sherpa_onnx.OfflineSpeakerDiarization(config)
+            return made
+
+        self._config = config
+        self._clusters = -1  # what the whole-recording diarizer is currently set to find
 
         # Its clustering threshold is a distance: higher merges more. For a whole recording, 0.7-0.9
         # found the right speaker count on the test conversation (0.5 split speakers). For live
         # utterances it is set to over-split instead: the session's book merges the pieces back,
         # while a merge here (a short turn lumped in with the next speaker) cannot be undone.
-        self._whole = diarizer(0.8)
-        self._live = diarizer(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3")))
+        self._whole = sherpa_onnx.OfflineSpeakerDiarization(config(0.8))
+        self._live = sherpa_onnx.OfflineSpeakerDiarization(config(float(os.environ.get("SCRIBE_DIARIZE_LIVE_THRESHOLD", "0.3"))))
 
-    def turns(self, audio: np.ndarray, live: bool) -> list[tuple[float, float, int]]:
+    def turns(self, audio: np.ndarray, live: bool, num_speakers: int | None = None) -> list[tuple[float, float, int]]:
+        """`num_speakers` (whole recordings only): cluster to exactly this many speakers."""
+        if not live and (clusters := num_speakers or -1) != self._clusters:
+            self._whole.set_config(self._config(0.8, clusters))
+            self._clusters = clusters
         result = (self._live if live else self._whole).process(audio).sort_by_start_time()
         return [(s.start, s.end, s.speaker) for s in result]
 
@@ -236,8 +251,8 @@ def _child_start(factory, nice: int) -> None:
     _child = factory()
 
 
-def _child_turns(audio, live: bool):
-    return _child.turns(_open(audio), live)  # type: ignore[union-attr]
+def _child_turns(audio, live: bool, num_speakers: int | None = None):
+    return _child.turns(_open(audio), live, num_speakers)  # type: ignore[union-attr]
 
 
 def _child_voice(audio):
@@ -360,17 +375,17 @@ class Diarizer:
                 block.close()
                 block.unlink()
 
-    def _turns(self, audio: np.ndarray, live: bool = False) -> list[Turn]:
+    def _turns(self, audio: np.ndarray, live: bool = False, num_speakers: int | None = None) -> list[Turn]:
         raw = self._call(
             live,
-            lambda a: self._sherpa.turns(a, live),
-            partial(_child_turns, live=live),
+            lambda a: self._sherpa.turns(a, live, num_speakers),
+            partial(_child_turns, live=live, num_speakers=num_speakers),
             audio,
         )
         return tidy([Turn(start, end, label) for start, end, label in raw])
 
-    def voice(self, audio: np.ndarray) -> np.ndarray:
-        return self._call(True, self._sherpa.voice if self._sherpa is not None else None, _child_voice, audio)
+    def voice(self, audio: np.ndarray, live: bool = True) -> np.ndarray:
+        return self._call(live, self._sherpa.voice if self._sherpa is not None else None, _child_voice, audio)
 
     def turns(self, audio: np.ndarray, book: SpeakerBook) -> list[tuple[Turn, Speaker]]:
         """Split one utterance into turns and name each turn's speaker from the session's book.
@@ -397,12 +412,80 @@ class Diarizer:
                 out.append((turn, speaker))
             return _merge_same_speaker(out)
 
-    def whole(self, audio: np.ndarray) -> list[tuple[Turn, int]]:
-        """Turns of a whole recording, speakers numbered 1.. in order of first appearance."""
+    def whole(self, audio: np.ndarray, num_speakers: int | None = None) -> list[tuple[Turn, int]]:
+        """Turns of a whole recording, speakers numbered 1.. in order of first appearance.
+
+        `num_speakers`, if the caller knows it, makes the clusterer find exactly that many.
+        Otherwise it finds as many as it likes, and the scraps among them join the real speakers
+        (`absorb_scraps`).
+        """
         with self._whole_lock:
-            turns = self._turns(audio)
+            turns = self._turns(audio, num_speakers=num_speakers)
+            if num_speakers is None:
+                turns = absorb_scraps(turns, audio, lambda clip: self.voice(clip, live=False))
         numbers: dict[int, int] = {}
         return [(t, numbers.setdefault(t.label, len(numbers) + 1)) for t in turns]
+
+
+def absorb_scraps(turns: list[Turn], audio: np.ndarray, voice) -> list[Turn]:
+    """Fold the clusterer's scrap speakers (see SCRAP_S) into the speakers they sound like.
+
+    `voice(clip)` is a speaker embedding. A scrap whose voice cannot be measured (under half a
+    second of audio) goes to whoever is speaking nearest to it in time.
+    """
+    seconds: dict[int, float] = {}
+    for turn in turns:
+        seconds[turn.label] = seconds.get(turn.label, 0.0) + turn.duration
+    if len(seconds) < 2:
+        return turns
+    total = sum(seconds.values())
+    keep = {label for label, sec in seconds.items() if sec >= SCRAP_S and sec / total >= SCRAP_SHARE}
+    keep.add(max(seconds, key=lambda label: seconds[label]))  # somebody has to be the speaker
+    scraps = [label for label in seconds if label not in keep]
+    if not scraps:
+        return turns
+
+    def centroid(label: int) -> np.ndarray | None:
+        clips, got = [], 0.0
+        for turn in sorted((t for t in turns if t.label == label), key=lambda t: -t.duration):
+            if got >= EMBED_CAP_S:
+                break
+            clips.append(audio[int(turn.start * RATE) : int(turn.end * RATE)])
+            got += turn.duration
+        clip = np.concatenate(clips)
+        if len(clip) < RATE // 2:
+            return None
+        try:
+            vector = np.asarray(voice(clip), dtype=np.float32)
+        except Exception:  # a voice that cannot be measured is placed by time instead
+            log.exception("measuring a speaker's voice failed")
+            return None
+        norm = float(np.linalg.norm(vector))
+        return vector / norm if norm else None
+
+    known = {label: c for label in keep if (c := centroid(label)) is not None}
+    kept_turns = [t for t in turns if t.label in keep]
+
+    def nearest_in_time(turn: Turn) -> int:
+        return min(kept_turns, key=lambda k: max(k.start - turn.end, turn.start - k.end, 0.0)).label
+
+    move: dict[int, int] = {}
+    for label in scraps:
+        mine = centroid(label)
+        if mine is None or not known:
+            move[label] = -1  # by time, turn by turn
+            continue
+        best = max(known, key=lambda k: float(mine @ known[k]))
+        if seconds[label] < SCRAP_S or float(mine @ known[best]) >= MATCH:
+            move[label] = best
+
+    def relabelled(turn: Turn) -> int:
+        target = move.get(turn.label, turn.label)
+        return nearest_in_time(turn) if target == -1 else target
+
+    out = [Turn(t.start, t.end, relabelled(t)) for t in turns]
+    log.info("speakers: %d found, %d after folding in scraps", len(seconds), len({t.label for t in out}))
+    return tidy(out)
 
 
 def _merge_same_speaker(pairs: list[tuple[Turn, Speaker]]) -> list[tuple[Turn, Speaker]]:

@@ -24,7 +24,7 @@ class Models:
     """Stand-in for `Sherpa`. The first sample picks the behaviour: 1 holds the global lock for
     HOLD_S, 2 sleeps (lock free), 9 kills the process; anything else answers at once."""
 
-    def turns(self, audio, live):
+    def turns(self, audio, live, num_speakers=None):
         flag = int(audio[0])
         if flag == 1:
             ctypes.PyDLL(None).usleep(int(HOLD_S * 1e6))  # a C call that keeps the lock, as sherpa's do

@@ -59,7 +59,8 @@ Spotify pages likewise fail.
 | `--format text\|json\|srt\|md` | Output format (default `text`). `json` is the one for programs. |
 | `--out FILE` | Write the transcript to FILE (parents created) and print the path, instead of printing the transcript. With several sources, a directory: `01-<title>.<ext>`, `02-...`, one path printed per file (and an `index.json` with `--format json`). |
 | `--from FILE` | Also read SOURCEs from FILE, one per line (`-` is stdin; blank lines and `#` comments are skipped). |
-| `--speakers` | Separate speakers: `Speaker 1`, `Speaker 2`, ... (slower; CPU diarization on the server). |
+| `--speakers` | Separate speakers: `Speaker 1`, `Speaker 2`, ... (slower; CPU diarization on the server). scribe counts the speakers itself and folds scraps (a few seconds of someone's voice on a bad line) into the real ones. |
+| `--num-speakers N` | Separate speakers, and there are exactly `N` (1 to 20). Use it whenever you know: it is more accurate than letting scribe count. Implies `--speakers`. |
 | `--timestamps` | `text` format only: start each line with `[hh:mm:ss]`. |
 | `--episode N` | Of a show or feed: the Nth newest episode (default 1). |
 | `--no-save` | Do not keep the transcript in the server's History (default: kept, titled with the episode). |

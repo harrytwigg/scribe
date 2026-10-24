@@ -294,3 +294,28 @@ def test_cancelling_a_fetch_stops_the_download(harness):
         time.sleep(0.5)
         assert len(reads) == settled and settled < 100, "the download thread must stop, not run on to the end"
         assert c.get("/api/sessions").json() == []
+
+
+def test_a_known_speaker_count_is_passed_to_the_separator_and_implies_separating(tmp_path):
+    counts = []
+
+    class Counting(FakeDiarizer):
+        def whole(self, audio, num_speakers=None):
+            counts.append(num_speakers)
+            return super().whole(audio, num_speakers)
+
+    h = Harness(tmp_path)
+    h.services.diarization = DiarizerSlot(Counting())
+    h.ready()
+    audio = np.concatenate([silence(0.5), pitch(300, 2), silence(1), pitch(500, 2), silence(0.5)])
+    try:
+        with h.client as c:
+            job = wait(c, upload(c, audio, speakers="2").json()["id"])  # no `diarize`: asking for a count is enough
+            assert job["status"] == "done" and job["result"]["speakers"] == 2
+            wait(c, upload(c, audio, diarize="true").json()["id"])
+            assert counts == [2, None]
+            assert upload(c, audio, speakers="0").status_code == 422
+            assert upload(c, audio, speakers="21").status_code == 422
+            assert c.post("/api/transcriptions/link", json={"url": "https://x.test/a.mp3", "speakers": 99}).status_code == 422
+    finally:
+        h.worker.stop()
