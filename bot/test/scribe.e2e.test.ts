@@ -100,7 +100,7 @@ beforeAll(async () => {
   })
   server.stdout!.on('data', (d) => log.push(String(d)))
   server.stderr!.on('data', (d) => log.push(String(d)))
-  await until('server', () => fetch(`${base}/api/whoami`).then(() => true).catch(() => undefined), 120_000)
+  await until('server', () => fetch(`${base}/api/status`).then(() => true).catch(() => undefined), 120_000)
   await ensureDownloaded(FIRST)
   await ensureDownloaded(SECOND)
   await activate(FIRST)

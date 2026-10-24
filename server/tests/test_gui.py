@@ -1,4 +1,4 @@
-"""The GUI in a real browser against a real server on the GPU: sign in, pick models, transcribe,
+"""The GUI in a real browser against a real server on the GPU: open it, pick models, transcribe,
 download, watch a live session, read history.
 
     uv run playwright install chromium   # once

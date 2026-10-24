@@ -88,5 +88,5 @@ deploy/install.sh     # first run writes ~/.config/scribe/env from deploy/env.ex
 
 The script copies the code to `~/.local/opt/scribe`, builds it and (re)starts the
 `scribe-server` and `scribe-bot` user units. The server listens on the addresses in `SCRIBE_HOST`
-and refuses to listen on every interface (`0.0.0.0`): there is no API token, so name the addresses
-(loopback and the tailnet's) and keep the server off any network you do not trust.
+and wants each one written as an IP address (it refuses `0.0.0.0`, `::` and their other spellings): there is no
+API token, so name the addresses (loopback and the tailnet's) and keep the server off any network you do not trust.

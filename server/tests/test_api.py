@@ -174,6 +174,8 @@ def test_extension_origin_may_write_other_extensions_may_not(harness):
 
 
 def test_the_server_refuses_to_listen_on_every_interface():
+    import socket
+
     import pytest
 
     from scribe_server.config import Settings
@@ -184,10 +186,23 @@ def test_the_server_refuses_to_listen_on_every_interface():
             default_model="", queue_depth=1,
         )
 
-    settings("127.0.0.1", "100.76.208.67").check()  # named addresses are fine
-    for wide in ("0.0.0.0", "::"):
+    settings("127.0.0.1", "100.76.208.67", "::1", "localhost").check()  # named addresses are fine
+    # Every way of writing "all interfaces" that the socket layer accepts, and some it does not.
+    wide = ["0.0.0.0", "::", "0", "0.0", "00.0.0.0", "::0", "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0", "<any>", "<broadcast>",
+            "255.255.255.255", "*", "", "harry-box", "224.0.0.1"]
+    for host in wide:
         with pytest.raises(SystemExit, match="no API token"):
-            settings("127.0.0.1", wide).check()
+            settings(host).check()
+        with pytest.raises(SystemExit):
+            settings("127.0.0.1", host).check()  # one wide address in a list is enough
+    with pytest.raises(SystemExit, match="no address"):
+        settings().check()
+    # What the check keeps out really would have bound everywhere (the spellings Python's socket accepts).
+    for spelling in ("0", "0.0"):
+        probe = socket.socket()
+        probe.bind((spelling, 0))
+        assert probe.getsockname()[0] == "0.0.0.0"
+        probe.close()
 
 
 def test_abandoned_browser_sessions_are_ended(harness, monkeypatch):

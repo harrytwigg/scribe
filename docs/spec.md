@@ -246,9 +246,11 @@ reachable while the box is off is H5.
 - **There is no API token or sign-in** (Harry, 2026-10-24; it began as a bearer token plus a GUI
   session cookie, and `SCRIBE_TRUST_LOCALHOST` had already exempted the machine itself). Who may
   use the server is decided by who can reach it: it listens only on the addresses in `SCRIBE_HOST`
-  (loopback and the tailnet address on harry-box) and refuses `0.0.0.0` and `::`. Every machine on
+  (loopback and the tailnet address on harry-box), each written as an IP address; it refuses every
+  spelling of "all interfaces" (`0.0.0.0`, `::`, `0`, `::ffff:0.0.0.0`, ...) and names. Every machine on
   the tailnet, and every process on harry-box including agent sessions, can read History (call
-  transcripts), start transcriptions and change models. Keep it off any network that is not trusted.
+  transcripts), start transcriptions (including ones that make the server fetch a public URL, which
+  `POST /api/transcriptions/link` does with private addresses refused) and change models. Keep it off any network that is not trusted.
 - What is still checked, for browsers: a state-changing request carrying an `Origin` that is not the
   server's own is refused (CSRF: a multipart POST needs no preflight), except the Chrome
   extension's own origin (4); and the `Host` header must be one of the server's names (DNS

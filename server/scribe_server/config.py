@@ -1,5 +1,6 @@
 """Settings, all from the environment."""
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,10 +66,29 @@ class Settings:
 
     def check(self) -> None:
         """Refuse to listen on every interface: with no token, who can reach the server is decided
-        by the addresses it listens on, so they must be named (docs/spec.md, 3.7)."""
-        wide = [h for h in self.hosts if h in {"0.0.0.0", "::", "", "*"}]
-        if wide:
-            raise SystemExit(
-                f"scribe: refusing to listen on {', '.join(repr(h) for h in wide)}: there is no API token, "
-                "so name the addresses to listen on (SCRIBE_HOST), e.g. 127.0.0.1 and the tailnet address"
-            )
+        by the addresses it listens on, so they must be named (docs/spec.md, 3.7). Each one must be
+        an address written out in full (or "localhost"), because the socket would read "0", "0.0"
+        or "::0" as every interface too."""
+        if not self.hosts:
+            raise SystemExit("scribe: SCRIBE_HOST names no address to listen on")
+        for host in self.hosts:
+            if reason := _unfit_to_listen_on(host):
+                raise SystemExit(
+                    f"scribe: refusing to listen on {host!r} ({reason}): there is no API token, so name the "
+                    "addresses to listen on (SCRIBE_HOST), e.g. 127.0.0.1 and the tailnet address"
+                )
+
+
+def _unfit_to_listen_on(host: str) -> str | None:
+    """Why this is not a single named address to bind, or None if it is one."""
+    if host == "localhost":
+        return None
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "not an IP address"
+    mapped = getattr(address, "ipv4_mapped", None)
+    for each in (address, mapped):
+        if each is not None and (each.is_unspecified or each.is_multicast or each == ipaddress.IPv4Address("255.255.255.255")):
+            return "every interface, or not one machine's address"
+    return None
