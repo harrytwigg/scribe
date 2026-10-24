@@ -300,7 +300,7 @@ def test_a_known_speaker_count_is_passed_to_the_separator_and_implies_separating
     counts = []
 
     class Counting(FakeDiarizer):
-        def whole(self, audio, num_speakers=None):
+        def whole(self, audio, num_speakers=None, cancel=None):
             counts.append(num_speakers)
             return super().whole(audio, num_speakers)
 
@@ -317,5 +317,36 @@ def test_a_known_speaker_count_is_passed_to_the_separator_and_implies_separating
             assert upload(c, audio, speakers="0").status_code == 422
             assert upload(c, audio, speakers="21").status_code == 422
             assert c.post("/api/transcriptions/link", json={"url": "https://x.test/a.mp3", "speakers": 99}).status_code == 422
+    finally:
+        h.worker.stop()
+
+
+def test_cancelling_a_job_stops_its_work_in_the_separator(tmp_path):
+    import threading
+
+    seen = {}
+
+    class Slow(FakeDiarizer):
+        def whole(self, audio, cancel=None):
+            seen["started"] = True
+            seen["stopped"] = cancel.wait(10)  # a real separator would be busy for minutes
+            raise RuntimeError("cancelled")
+
+    h = Harness(tmp_path)
+    h.services.diarization = DiarizerSlot(Slow())
+    h.ready()
+    audio = np.concatenate([silence(0.5), pitch(300, 2), silence(0.5)])
+    try:
+        with h.client as c:
+            job_id = upload(c, audio, diarize="true").json()["id"]
+            deadline = time.monotonic() + 5
+            while not seen.get("started") and time.monotonic() < deadline:
+                time.sleep(0.02)
+            c.delete(f"/api/transcriptions/{job_id}")
+            assert wait(c, job_id)["status"] == "cancelled"
+            deadline = time.monotonic() + 5
+            while "stopped" not in seen and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert seen["stopped"] is True  # the cancel event reached the separator
     finally:
         h.worker.stop()

@@ -279,7 +279,7 @@ def test_num_speakers_is_sent_and_implies_speakers(served, tmp_path, capsys):
     from .test_diarize import FakeDiarizer
 
     class Counting(FakeDiarizer):
-        def whole(self, audio, num_speakers=None):
+        def whole(self, audio, num_speakers=None, cancel=None):
             seen.append(num_speakers)
             return super().whole(audio, num_speakers)
 
