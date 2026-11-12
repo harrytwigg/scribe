@@ -190,6 +190,9 @@ class Marker(BaseModel):
     started_at: float
     text: str
     duration_ms: int = Field(0, ge=0)  # how much audio it stands for, so a reprocess finds it
+    # The key of the utterance it stands for. If that utterance reached the server after all (the
+    # client gave up on a request that was still running), a reprocess keeps the real line.
+    client_key: str | None = Field(None, max_length=200)
 
 
 class Reprocess(BaseModel):
@@ -1001,7 +1004,8 @@ def create_app(services: Services) -> FastAPI:
         session_or_404(session_id)
         touch(session_id)
         line, _ = s.store.add_utterance(
-            session_id, body.speaker_id, body.speaker_name, body.started_at, body.duration_ms, body.text, None, None
+            session_id, body.speaker_id, body.speaker_name, body.started_at, body.duration_ms, body.text, None, None,
+            f"gap:{body.client_key}" if body.client_key else None,
         )
         hub.publish(session_id, "line", line)
         return line
@@ -1122,8 +1126,16 @@ def create_app(services: Services) -> FastAPI:
         lines = s.store.utterances(session_id)
         markers = gaps_in(lines, rec.summary(session_id)["channels"])
         filled = unrecoverable = failed = added = 0
+        def has_line(key: str) -> bool:
+            return bool(s.store.utterance_by_key(session_id, key) or s.store.utterances_by_key_prefix(session_id, key))
+
         for number, marker in enumerate(markers, 1):
             channel = channel_of(marker)
+            live = (marker["client_key"] or "").removeprefix("gap:") if (marker["client_key"] or "").startswith("gap:") else None
+            if live and has_line(live):  # the request the client gave up on was served after all
+                s.store.delete_utterances([marker["id"]])
+                filled += 1
+                continue
             seconds = marker["duration_ms"] / 1000 or int(GAP.match(marker["text"]).group(1)) + 1
             start, end = marker["started_at"] - GAP_PAD_S, marker["started_at"] + seconds + GAP_PAD_S
             if rec.coverage(session_id, channel, start, end) < (end - start) / 2:
@@ -1137,8 +1149,7 @@ def create_app(services: Services) -> FastAPI:
             key = f"fill:{marker['id']}"
             diarizer = s.diarization.ready() if is_diarized(lines, channel) else None
             try:
-                stored = s.store.utterances_by_key_prefix(session_id, key) or [s.store.utterance_by_key(session_id, key)]
-                if not stored[0]:  # not stored by an earlier attempt that stopped before removing the marker
+                if not has_line(key):  # an earlier attempt may have stored it and stopped before removing the marker
                     reply = await busy_retry(
                         lambda: ingest(session_id, audio, None, marker["speaker_id"], marker["speaker_name"], origin, key, diarizer)
                     )
