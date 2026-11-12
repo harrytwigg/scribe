@@ -113,3 +113,21 @@ test('a segment is stored before it is sent', async () => {
   await u.whenIdle(1000)
   assert.deepEqual(events, ['stored', 'sent', 'deleted'])
 })
+
+test('a new segment is sent at once, not after the backoff of an older one', { timeout: 3000 }, async () => {
+  let calls = []
+  const client = {
+    putRecordingChunk: async (session, channel, index) => {
+      calls.push(index)
+      if (index === 0 && calls.length === 1) throw new ServerError(503, 'busy')
+    },
+  }
+  // A wait that, once begun, only a new segment cuts short.
+  const u = new ChunkUploader({ clientFor: () => client, store: memoryChunkStore(), sleep: () => new Promise(() => {}) })
+  await u.add('http://box:8787', 's1', segment(0))
+  await new Promise((resolve) => setTimeout(resolve, 20)) // segment 0 has failed; the loop is waiting
+  await u.add('http://box:8787', 's1', segment(1))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(calls, [0, 1])
+  u.close()
+})

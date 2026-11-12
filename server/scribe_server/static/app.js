@@ -387,7 +387,7 @@ const historyViewer = new Viewer($('#history-view'), {
 
 /** Fill a call's gaps from its recording, or transcribe all of it again, and show the result. */
 async function reprocessSession(id, mode) {
-  if (mode === 'all' && !confirm('Transcribe the whole recording again? The new transcript replaces this one. Names given to the other side\'s speakers are not kept.')) return;
+  if (mode === 'all' && !confirm('Transcribe the whole recording again? The new transcript replaces this one (nothing is replaced unless the recording covers it). Names given to the other side\'s speakers are not kept.')) return;
   const viewer = historyViewer;
   const note = (text) => viewer.session?.id === id && viewer.renderRecording(text);
   viewer.working = true;

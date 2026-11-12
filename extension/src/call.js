@@ -33,6 +33,7 @@ export class Call {
     this.uploader = uploader ?? new ChunkUploader({ clientFor: () => this.client })
     this.recorderOptions = recorderOptions
     this.recorders = []
+    this.adding = new Set() // segments being written to local storage
     this.giveUp = new AbortController() // ends the waiting on a busy server when the call is over
     this.contexts = []
     this.inflight = new Set()
@@ -94,7 +95,9 @@ export class Call {
   record(stream, channel) {
     try {
       const recorder = new ChannelRecorder(stream, channel, (segment) => {
-        this.uploader.add(this.config.server, this.sessionId, segment).catch(() => {})
+        const adding = this.uploader.add(this.config.server, this.sessionId, segment).catch(() => {})
+        this.adding.add(adding)
+        adding.finally(() => this.adding.delete(adding))
       }, this.recorderOptions)
       recorder.start()
       this.recorders.push(recorder)
@@ -193,6 +196,7 @@ export class Call {
       this.giveUp.abort()
       await settled
       // The recording gets a moment too; what is left stays in local storage and is sent later.
+      await Promise.allSettled([...this.adding]) // the last segment must be stored (or sent) before anything waits on the queue
       await this.uploader.whenIdle(this.uploadGraceMs)
       if (this.sessionId) await this.client.endSession(this.sessionId).catch((error) => (this.error = error.message))
       this.done = true

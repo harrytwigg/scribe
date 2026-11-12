@@ -1097,7 +1097,7 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(400, str(error)) from error
         if got is None:
             raise HTTPException(404, "no such recording")
-        audio, origin = got
+        audio, origin, _ = got
         return Response(
             wav_bytes(audio), media_type="audio/wav",
             headers={"X-Recording-Started-At": repr(origin), "Content-Disposition": f'attachment; filename="scribe-{session_id}-{channel}.wav"'},
@@ -1152,11 +1152,20 @@ def create_app(services: Services) -> FastAPI:
         own = [u for u in lines if channel_of(u) == channel and u["speaker_id"] == channel and not GAP.match(u["text"])]
         return own[0]["speaker_name"] if own else ("Others" if channel == "tab" else "Me")
 
+    def line_span(line: dict) -> float:
+        """Seconds of audio a transcript line stands for. A marker stands for what it lost (older
+        ones say so only in the text); a line with no length stands for nothing."""
+        if line["duration_ms"]:
+            return line["duration_ms"] / 1000
+        gap = GAP.match(line["text"])
+        return int(gap.group(1)) + 1 if gap else 0.0
+
     def covered(lines: list[dict], channel: str, start: float, end: float) -> float:
-        """Seconds of [start, end] that the channel's transcript lines account for."""
+        """Seconds of [start, end] that the channel's transcript lines account for. A marker
+        counts: speech a marker stands for is for the gap fill to deal with, not to be found again."""
         spans = sorted(
-            (max(u["started_at"], start), min(u["started_at"] + u["duration_ms"] / 1000, end))
-            for u in lines if channel_of(u) == channel and u["duration_ms"] and not GAP.match(u["text"])
+            (max(u["started_at"], start), min(u["started_at"] + line_span(u), end))
+            for u in lines if channel_of(u) == channel and line_span(u)
         )
         total, cursor = 0.0, start
         for a, b in spans:
@@ -1187,17 +1196,19 @@ def create_app(services: Services) -> FastAPI:
                 s.store.delete_utterances([marker["id"]])
                 filled += 1
                 continue
-            seconds = marker["duration_ms"] / 1000 or int(GAP.match(marker["text"]).group(1)) + 1
+            seconds = line_span(marker)
             start, end = marker["started_at"] - GAP_PAD_S, marker["started_at"] + seconds + GAP_PAD_S
             if rec.coverage(session_id, channel, start, end) < (end - start) / 2:
                 unrecoverable += 1
                 continue
             got = await asyncio.to_thread(rec.read, session_id, channel, start, end)
-            if got is None:
+            if got is None or got.unreadable:  # a segment that cannot be decoded is not quiet
                 unrecoverable += 1
                 continue
-            audio, origin = got
-            key = f"fill:{marker['id']}"
+            audio, origin, _ = got
+            # The key of the utterance it stands for, so that if the live request the client gave up
+            # on is served after all, the unique index keeps one of them (older markers: their own).
+            key = live or f"fill:{marker['id']}"
             diarizer = s.diarization.ready() if is_diarized(lines, channel) else None
             try:
                 if not has_line(key):  # an earlier attempt may have stored it and stopped before removing the marker
@@ -1222,7 +1233,8 @@ def create_app(services: Services) -> FastAPI:
             got = await asyncio.to_thread(rec.read, session_id, channel)
             if got is None:
                 continue
-            audio, origin = got
+            audio, origin, unreadable = got
+            failed += len(unreadable)  # speech in a segment that cannot be decoded cannot be found
             name, diarizer = speaker_of(lines, channel), (s.diarization.ready() if is_diarized(lines, channel) else None)
             for a, b in unheard(lines, channel, await find_speech(audio, merged=False), origin):
                 start = origin + a / RATE
@@ -1244,7 +1256,14 @@ def create_app(services: Services) -> FastAPI:
         return {
             "mode": "gaps", "gaps": len(markers), "filled": filled, "unrecoverable": unrecoverable, "failed": failed,
             "unheard": found, "lines": added, "remaining": remaining, "scanned_bytes": size,
+            # Nothing left undone: no marker still standing, no failure, no unreadable segment.
+            "complete": remaining == 0 and failed == 0,
         }
+
+    def in_recording(session_id: str, line: dict) -> bool:
+        """Does the recording have (most of) the audio this line stands for?"""
+        seconds = line_span(line) or 0.5
+        return s.recordings.coverage(session_id, channel_of(line), line["started_at"], line["started_at"] + seconds) >= seconds / 2
 
     async def reprocess_all(job: Job, session_id: str) -> dict:
         """Transcribe the whole recording again, channel by channel, and replace the transcript of
@@ -1263,7 +1282,9 @@ def create_app(services: Services) -> FastAPI:
                 got = await asyncio.to_thread(rec.read, session_id, channel)
                 if got is None:
                     continue
-                audio, origin = got
+                if got.unreadable:
+                    raise RecordingError(f"{len(got.unreadable)} segment(s) of the {channel} recording cannot be decoded")
+                audio, origin, _ = got
                 diarizer = s.diarization.ready() if channel in saved else None
                 if channel in saved:
                     s.store.replace_speaker_rows(session_id, channel, [])
@@ -1276,7 +1297,8 @@ def create_app(services: Services) -> FastAPI:
                     )
                     added += len(reply.get("lines", [reply] if "id" in reply else []))
                     job.stage_progress = (position + number / len(spans)) / len(channels)
-            s.store.delete_utterances([u["id"] for u in lines if channel_of(u) in channels])
+            # Only what the recording covers is replaced: a line from a stretch it does not have stays.
+            s.store.delete_utterances([u["id"] for u in lines if channel_of(u) in channels and in_recording(session_id, u)])
         except BaseException:
             s.store.delete_utterances_by_key_prefix(session_id, f"re{run}:")
             for channel, rows in saved.items():
@@ -1286,7 +1308,7 @@ def create_app(services: Services) -> FastAPI:
         forget(session_id)
         return {
             "mode": "all", "channels": channels, "lines": added, "scanned_bytes": size,
-            "remaining": len(gaps_in(s.store.utterances(session_id), channels)),
+            "remaining": (remaining := len(gaps_in(s.store.utterances(session_id), channels))), "complete": remaining == 0,
         }
 
     async def run_reprocess(job: Job, session_id: str, mode: str) -> None:
@@ -1294,7 +1316,10 @@ def create_app(services: Services) -> FastAPI:
             await wait_for_slot(job)
             job.status, job.step = "transcribing", "filling the gaps" if mode == "gaps" else "transcribing the recording"
             job.result = await (reprocess_all(job, session_id) if mode == "all" else reprocess_gaps(job, session_id))
-            s.recordings.note_reprocess(session_id, job.result["remaining"] == 0, job.result["scanned_bytes"])
+            # Only a pass that left nothing undone starts the shorter retention, and is not repeated
+            # by the automatic one: a failure is tried again, by it or by hand.
+            done = job.result["complete"]
+            s.recordings.note_reprocess(session_id, done, job.result["scanned_bytes"] if done else None)
             job.status, job.stage_progress = "done", 1.0
             log.info("reprocessed session %s (%s): %s", session_id, mode, job.result)
         except asyncio.CancelledError:
@@ -1318,6 +1343,18 @@ def create_app(services: Services) -> FastAPI:
         if s.recordings is None or s.recordings.summary(session_id) is None:
             raise HTTPException(404, "this session has no recording")
         require_model()
+        if mode == "all":
+            if session["ended_at"] is None:
+                raise HTTPException(409, "the call is still going: transcribe it again once it has ended")
+            channels = s.recordings.summary(session_id)["channels"]
+            lines = s.store.utterances(session_id)
+            missing = [u for u in lines if channel_of(u) in channels and not GAP.match(u["text"]) and not in_recording(session_id, u)]
+            if missing:
+                raise HTTPException(
+                    409,
+                    f"the recording does not cover {len(missing)} line(s) of this transcript (a segment never arrived), "
+                    "so transcribing it again would lose them: fill the gaps instead",
+                )
         if any(j.kind == "reprocess" and j.session_id == session_id and j.active for j in jobs.values()):
             raise HTTPException(409, "this session is already being reprocessed")
         job = new_job(f"Reprocess: {session['title']}")

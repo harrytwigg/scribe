@@ -132,3 +132,19 @@ test('recording can be turned off, and a browser that cannot record does not sto
   assert.deepEqual(noRecorder.recorders, [])
   assert.match(noRecorder.recordingError, /not recording the tab/)
 })
+
+test('ending the call waits for the last segment to be stored before it asks whether the queue is empty', { timeout: 3000 }, async () => {
+  const { c, puts } = recordingCall()
+  c.record({}, 'tab')
+  let release
+  const store = c.uploader.store
+  const put = store.put
+  store.put = (record) => new Promise((resolve) => (release = () => put.call(store, record).then(resolve))) // a slow disk
+  c.client.endSession = async () => ({})
+  const stopping = c.stop()
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  release()
+  await stopping
+  assert.equal(puts.calls.length, 1, 'the segment written last was still delivered before the session ended')
+  assert.equal(c.uploader.pending, 0)
+})

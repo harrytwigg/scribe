@@ -453,6 +453,7 @@ def test_the_whole_recording_can_be_transcribed_again(harness):
     track = np.concatenate([silence(5), tone(3), silence(22), tone(4), silence(5)])
     put(c, sid, "mic", 0, track, T0)
     c.post(f"/api/sessions/{sid}/speakers/mic", json={"name": "Harry Twigg"})  # a name given in the GUI
+    c.post(f"/api/sessions/{sid}/end")
     with c:
         job = wait(c, c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"}).json()["id"])
     assert job["status"] == "done" and job["result"]["remaining"] == 0, job
@@ -468,6 +469,7 @@ def test_a_failed_reprocess_all_leaves_the_transcript_as_it_was(harness):
     sid = new_call(c)
     live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
     put(c, sid, "mic", 0, np.concatenate([silence(5), tone(3), silence(30), tone(3), silence(2)]), T0)  # two utterances
+    c.post(f"/api/sessions/{sid}/end")
     before = lines_of(c, sid)
 
     calls = {"n": 0}
@@ -548,3 +550,169 @@ def test_a_reprocess_that_leaves_gaps_does_not_shorten_retention(tmp_path):
     rec.put(sid, "tab", 0, T0, b"x")
     rec.note_reprocess(sid, complete=False, now=T0)
     assert rec.purge({sid: T0 + 1}, T0 + 10 * 86400) == []
+
+
+# -- review findings: what a reprocess must never do -------------------------------------------
+
+
+def test_transcribing_all_again_refuses_to_lose_lines_the_recording_does_not_cover(harness):
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
+    live_line(c, sid, "mic", "Harry", T0 + 100, tone(3), "mic:100")  # the recording stops at 30 s
+    put(c, sid, "mic", 0, np.concatenate([silence(5), tone(3), silence(22)]), T0)
+    before = lines_of(c, sid)
+    assert c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"}).status_code == 409  # the call is open
+    c.post(f"/api/sessions/{sid}/end")
+    refused = c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"})
+    assert refused.status_code == 409 and "does not cover 1 line" in refused.json()["detail"]
+    assert lines_of(c, sid) == before
+    # Filling gaps is still on offer.
+    with c:
+        assert wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])["status"] == "done"
+    assert [round(u["started_at"] - T0) for u in lines_of(c, sid)] == [5, 100]
+
+
+def test_transcribing_all_again_keeps_a_marker_the_recording_cannot_answer(harness):
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
+    marker(c, sid, "mic", "Harry", T0 + 100, 4)  # nothing recorded there
+    put(c, sid, "mic", 0, np.concatenate([silence(5), tone(3), silence(22)]), T0)
+    c.post(f"/api/sessions/{sid}/end")
+    with c:
+        job = wait(c, c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"}).json()["id"])
+    assert job["status"] == "done" and job["result"]["remaining"] == 1 and job["result"]["complete"] is False
+    assert [u["text"].startswith("[unavailable") for u in lines_of(c, sid)] == [False, True]
+
+
+def test_a_gap_whose_fill_failed_is_not_found_again_as_unheard_speech(harness):
+    """One pass fails on a marker; the next must fill that marker once, not leave two lines."""
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    marker(c, sid, "mic", "Harry", T0 + 10, 4)
+    put(c, sid, "mic", 0, np.concatenate([silence(10), tone(4), silence(6)]), T0)
+    engine = harness.loader.engines["alpha"]
+    original, calls = engine.transcribe, {"n": 0}
+
+    def fails_once(audio):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("the model fell over")
+        return original(audio)
+
+    engine.transcribe = fails_once
+    with c:
+        first = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+        assert first["result"]["failed"] == 1 and first["result"]["complete"] is False
+        assert [u["text"].startswith("[unavailable") for u in lines_of(c, sid)] == [True]  # nothing doubled
+        second = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert second["result"]["filled"] == 1 and second["result"]["complete"] is True
+    assert [u["text"] for u in lines_of(c, sid)] == ["alpha: 4.0s"]
+
+
+def test_a_segment_that_cannot_be_decoded_leaves_the_marker_and_the_pass_incomplete(harness, tmp_path):
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    marker(c, sid, "mic", "Harry", T0 + 10, 4)
+    assert put(c, sid, "mic", 0, b"this is not audio at all", T0, encode=None, duration_ms=30000).status_code == 201
+    with c:
+        job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert job["result"]["unrecoverable"] == 1 and job["result"]["remaining"] == 1 and job["result"]["complete"] is False
+    assert [u["text"].startswith("[unavailable") for u in lines_of(c, sid)] == [True]
+    manifest = json.loads((tmp_path / "recordings" / sid / "manifest.json").read_text())
+    assert manifest["reprocess_complete"] is False and manifest["scanned_bytes"] is None  # tried again later
+
+
+def test_a_failed_search_for_unheard_speech_is_not_a_complete_pass(harness, tmp_path):
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    put(c, sid, "mic", 0, np.concatenate([silence(2), tone(3), silence(2)]), T0)  # no line, no marker
+    engine = harness.loader.engines["alpha"]
+    engine.transcribe = lambda audio: (_ for _ in ()).throw(RuntimeError("the model fell over"))
+    with c:
+        job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert job["result"]["failed"] == 1 and job["result"]["complete"] is False
+    manifest = json.loads((tmp_path / "recordings" / sid / "manifest.json").read_text())
+    assert manifest["reprocess_complete"] is False and manifest["scanned_bytes"] is None
+
+
+def test_a_fill_shares_the_key_of_the_utterance_it_stands_for(harness):
+    """So that if the live request the client gave up on is served late, the index keeps one."""
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    key = f"mic:{T0 + 10}"
+    c.post(f"/api/sessions/{sid}/markers", json={
+        "speaker_id": "mic", "speaker_name": "Harry", "started_at": T0 + 10, "duration_ms": 3000, "client_key": key,
+        "text": "[unavailable: 3 s of audio from Harry]",
+    })
+    put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
+    with c:
+        wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert [u["client_key"] for u in lines_of(c, sid)] == [key]
+    assert live_line_raw(c, sid, "mic", "Harry", T0 + 10, tone(3), key).json()["id"] == lines_of(c, sid)[0]["id"]
+    assert len(lines_of(c, sid)) == 1  # the late live request found the line there
+
+
+# -- what the existing tests did not pin -------------------------------------------------------
+
+
+def test_where_two_segments_overlap_the_later_one_is_used(tmp_path):
+    rec = Recordings(tmp_path / "r")
+    sid = "1" * 12
+    rec.put(sid, "tab", 0, T0, wav(tone(10) * 0.3), mime="audio/wav", duration_ms=10_000)  # 0 to 10 s, quiet
+    rec.put(sid, "tab", 1, T0 + 8, wav(tone(10)), mime="audio/wav", duration_ms=10_000)  # 8 to 18 s, loud
+    samples, origin, bad = rec.read(sid, "tab")
+    assert origin == T0 and bad == []
+    assert abs(rms(samples[4 * RATE : 6 * RATE]) - rms(tone(2) * 0.3)) < 0.01
+    assert abs(rms(samples[9 * RATE : 10 * RATE]) - rms(tone(1))) < 0.01  # inside the overlap: the later one
+
+
+def test_a_failed_reprocess_all_puts_the_speaker_names_back(tmp_path):
+    h = Harness(tmp_path)
+    h.services.diarization = DiarizerSlot(FakeDiarizer())
+    h.ready()
+    c = h.client
+    try:
+        sid = new_call(c)
+        form = {"speaker_id": "tab", "speaker_name": "Others", "started_at": str(T0 + 2), "client_key": "tab:1", "diarize": "true"}
+        first = np.concatenate([pitch(300, 2), silence(0.8), pitch(700, 2), silence(0.5)])
+        c.post(f"/api/sessions/{sid}/utterances", data=form, files={"file": ("u.wav", wav(first))})
+        c.post(f"/api/sessions/{sid}/speakers/tab%232", json={"name": "Alice"})
+        put(c, sid, "tab", 0, np.concatenate([silence(2), first, silence(2)]), T0)
+        c.post(f"/api/sessions/{sid}/end")
+        before = (lines_of(c, sid), c.get(f"/api/sessions/{sid}").json()["speakers"])
+        rows = h.services.store.speaker_rows(sid, "tab")
+        engine = h.loader.engines["alpha"]
+        engine.transcribe = lambda audio: (_ for _ in ()).throw(RuntimeError("the model fell over"))
+        with c:
+            job = wait(c, c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"}).json()["id"])
+        assert job["status"] == "error"
+        assert (lines_of(c, sid), c.get(f"/api/sessions/{sid}").json()["speakers"]) == before
+        assert before[1] == {"tab#2": "Alice"}
+        assert h.services.store.speaker_rows(sid, "tab") == rows  # the voices came back too, not only the names
+    finally:
+        h.worker.stop()
+
+
+def test_a_gap_an_earlier_attempt_already_filled_is_not_transcribed_again(harness):
+    """An attempt stored the text and stopped before removing the marker: the next only removes it."""
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    made = marker(c, sid, "mic", "Harry", T0 + 10, 3)  # an older marker: no key of its own
+    harness.services.store.add_utterance(sid, "mic", "Harry", T0 + 10, 3000, "alpha: 3.0s", "alpha", 5, f"fill:{made['id']}")
+    put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
+    engine = harness.loader.engines["alpha"]
+    before = engine.calls
+    with c:
+        job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert job["result"]["filled"] == 1 and job["result"]["lines"] == 0
+    assert engine.calls == before  # nothing was sent to the model
+    assert [u["text"] for u in lines_of(c, sid)] == ["alpha: 3.0s"]

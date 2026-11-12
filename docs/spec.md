@@ -466,9 +466,17 @@ failed, so it yields to a live call.
   is the call during which the server was down, when no marker could be posted either. The channel
   is judged diarized from its existing lines (the tab with none is).
 - `all`: transcribe the whole recording again and replace the transcript of each recorded channel.
-  The new lines are stored first and the old removed at the end, so a failure or cancel leaves the
-  transcript as it was. A diarized tab starts again from no speakers, so names given to its speakers
-  are not kept; the mic's are.
+  Refused (409) while the call is still open, and when the recording does not cover every line of
+  the transcript (a segment never arrived): replacing would lose those lines, and gap filling is the
+  way then. The new lines are stored first and the old removed at the end, so a failure or cancel
+  leaves the transcript as it was (speaker names and voices included). A diarized tab starts again
+  from no speakers, so names given to its speakers are not kept; the mic's are.
+Both are careful about audio they cannot use: a segment that cannot be decoded is not taken for
+quiet. A marker whose audio it overlaps stays (and `all` fails), and the pass does not count as
+complete. A fill is stored under the key of the utterance it stands for, so if the live request the
+extension gave up on is served late after all, the transcript keeps one copy. Only a pass that
+leaves nothing undone (no marker standing, no failure, nothing unreadable) starts the shorter
+retention and stops the automatic pass; anything else is tried again.
 Once the server has no open call and no job running, it does the `gaps` pass itself on each ended
 call whose recording it has not been through (`SCRIBE_AUTO_REPROCESS`, on by default): at least 60 s
 after the call and after the last segment arrived, five minutes apart, at most four times, and again

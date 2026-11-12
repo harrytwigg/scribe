@@ -17,6 +17,7 @@ import logging
 import re
 import threading
 import time
+from typing import NamedTuple
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,12 @@ DAY = 86400.0
 
 class RecordingError(ValueError):
     pass
+
+
+class Audio(NamedTuple):
+    samples: np.ndarray  # 16 kHz mono
+    origin: float  # wall-clock time of the first sample
+    unreadable: list[str]  # segments that overlap it but could not be decoded: it has silence there
 
 
 def _suffix(mime: str) -> str:
@@ -222,9 +229,10 @@ class Recordings:
 
     def read(
         self, session_id: str, channel: str, start: float | None = None, end: float | None = None
-    ) -> tuple[np.ndarray, float] | None:
+    ) -> Audio | None:
         """The channel's audio between two wall-clock times (all of it by default), 16 kHz mono,
-        with silence where no segment covers; and the wall-clock time of its first sample.
+        with silence where no segment covers; the wall-clock time of its first sample; and the
+        segments that could not be decoded (a caller must not take their silence for quiet).
         None if the call has no recording of that channel."""
         with self._lock:
             manifest = self._load(session_id)
@@ -239,7 +247,7 @@ class Recordings:
         if stop - origin > MAX_READ_S:
             raise RecordingError(f"that is more than {MAX_READ_S // 3600} hours of audio")
         buffer = np.zeros(max(int((stop - origin) * RATE), 0) + RATE, dtype=np.float32)
-        top = 0
+        top, unreadable = 0, []
         for a, b, chunk in spans:
             if a >= stop or b + 1 <= origin:
                 continue
@@ -247,6 +255,7 @@ class Recordings:
                 audio = decode((self._dir(session_id) / chunk["file"]).read_bytes())
             except (AudioError, OSError) as error:
                 log.warning("segment %s of %s unreadable: %s", chunk["file"], session_id, error)
+                unreadable.append(chunk["file"])
                 continue
             offset = round((a - origin) * RATE)
             if offset < 0:
@@ -259,7 +268,7 @@ class Recordings:
             buffer[offset : offset + len(audio)] = audio
             top = max(top, offset + len(audio))
         length = int((stop - origin) * RATE) if end is not None else top
-        return buffer[: max(length, 0)], origin
+        return Audio(buffer[: max(length, 0)], origin, unreadable)
 
     # -- retention ------------------------------------------------------------------------------
 

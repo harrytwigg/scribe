@@ -109,12 +109,14 @@ export class ChunkUploader {
     this.items.set(record.key, { record, attempts: 0, due: 0 })
     this.onChange()
     this.kick()
+    this.wake?.() // a new segment need not wait out the backoff of an old one
   }
 
   kick() {
     this.running ??= this.loop().finally(() => {
       this.running = null
       this.onChange()
+      if (this.items.size && !this.closed) return this.kick() // queued as the loop was ending
       if (!this.items.size) {
         for (const resolve of this.waiters.splice(0)) resolve(true)
         this.onIdle()
@@ -128,7 +130,11 @@ export class ChunkUploader {
       const waiting = [...this.items.values()]
       const next = waiting.find((item) => item.due <= now)
       if (!next) {
-        await this.sleep(Math.max(Math.min(...waiting.map((item) => item.due)) - now, 50))
+        await Promise.race([
+          this.sleep(Math.max(Math.min(...waiting.map((item) => item.due)) - now, 50)),
+          new Promise((resolve) => (this.wake = resolve)),
+        ])
+        this.wake = null
         continue
       }
       await this.send(next)
