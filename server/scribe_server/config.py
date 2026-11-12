@@ -18,6 +18,12 @@ def _flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _default_diarization_threads() -> int:
+    """Eight on a big machine, but never more than half the cores: on a laptop that is also
+    running a call and a browser, the speaker separation must not take the machine."""
+    return max(2, min(8, (os.cpu_count() or 4) // 2))
+
+
 @dataclass(frozen=True)
 class Settings:
     hosts: list[str]
@@ -33,6 +39,11 @@ class Settings:
     browser_idle_s: float = 300
     diarization: bool = True
     diarization_threads: int = 8
+    record_calls: bool = True
+    recording_keep_days: float = 14
+    recording_after_reprocess_days: float = 3
+    recording_max_mb: int = 10240
+    auto_reprocess: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -48,7 +59,12 @@ class Settings:
             queue_depth=int(os.environ.get("SCRIBE_QUEUE_DEPTH", "32")),
             allowed_hosts=tuple(h.strip() for h in os.environ.get("SCRIBE_ALLOWED_HOSTS", "").split(",") if h.strip()),
             diarization=_flag("SCRIBE_DIARIZATION", True),
-            diarization_threads=int(os.environ.get("SCRIBE_DIARIZATION_THREADS", "8")),
+            diarization_threads=int(os.environ.get("SCRIBE_DIARIZATION_THREADS", str(_default_diarization_threads()))),
+            record_calls=_flag("SCRIBE_RECORD_CALLS", True),
+            recording_keep_days=float(os.environ.get("SCRIBE_RECORDING_KEEP_DAYS", "14")),
+            recording_after_reprocess_days=float(os.environ.get("SCRIBE_RECORDING_AFTER_REPROCESS_DAYS", "3")),
+            recording_max_mb=int(os.environ.get("SCRIBE_RECORDING_MAX_MB", "10240")),
+            auto_reprocess=_flag("SCRIBE_AUTO_REPROCESS", True),
             browser_idle_s=float(os.environ.get("SCRIBE_BROWSER_IDLE_SECONDS", "300")),
             extension_origins=tuple(
                 o.strip() for o in os.environ.get("SCRIBE_EXTENSION_ORIGINS", EXTENSION_ORIGIN).split(",") if o.strip()

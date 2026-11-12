@@ -103,6 +103,10 @@ class Store:
             limit,
         )
 
+    def session_times(self) -> dict[str, float | None]:
+        """Every session and when it ended (None while open)."""
+        return {row["id"]: row["ended_at"] for row in self._all("select id, ended_at from sessions")}
+
     def count_open_sessions(self) -> int:
         return self._one("select count(*) as n from sessions where ended_at is null")["n"]
 
@@ -154,6 +158,17 @@ class Store:
             session_id, client_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "#%",
         )
 
+    def delete_utterances(self, ids: list[int]) -> None:
+        for chunk in range(0, len(ids), 500):
+            part = ids[chunk : chunk + 500]
+            self._exec(f"delete from utterances where id in ({','.join('?' * len(part))})", *part)
+
+    def delete_utterances_by_key_prefix(self, session_id: str, prefix: str) -> None:
+        self._exec(
+            "delete from utterances where session_id = ? and client_key like ? escape '\\'",
+            session_id, prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
+        )
+
     def utterances(self, session_id: str) -> list[dict]:
         return self._all("select * from utterances where session_id = ? order by started_at, id", session_id)
 
@@ -175,6 +190,32 @@ class Store:
             "on conflict (session_id, speaker_id) do update set voice = excluded.voice, weight = excluded.weight",
             session_id, speaker_id, voice, weight,
         )
+
+    def speaker_rows(self, session_id: str, prefix: str) -> list[dict]:
+        """The stored speakers whose id starts with `prefix` (names and voices)."""
+        return self._all(
+            "select * from speakers where session_id = ? and substr(speaker_id, 1, ?) = ?",
+            session_id, len(prefix), prefix,
+        )
+
+    def replace_speaker_rows(self, session_id: str, prefix: str, rows: list[dict]) -> None:
+        """Make the stored speakers starting with `prefix` exactly `rows`."""
+        with self._lock:
+            self._db.execute("begin")
+            try:
+                self._db.execute(
+                    "delete from speakers where session_id = ? and substr(speaker_id, 1, ?) = ?",
+                    (session_id, len(prefix), prefix),
+                )
+                for row in rows:
+                    self._db.execute(
+                        "insert into speakers (session_id, speaker_id, name, voice, weight) values (?, ?, ?, ?, ?)",
+                        (session_id, row["speaker_id"], row["name"], row["voice"], row["weight"]),
+                    )
+                self._db.execute("commit")
+            except BaseException:
+                self._db.execute("rollback")
+                raise
 
     def rename_speaker(self, session_id: str, speaker_id: str, name: str) -> int:
         """Name a speaker for the session: their lines so far, and every line after. Returns lines changed."""

@@ -13,6 +13,7 @@ from .catalogue import CATALOGUE
 from .config import Settings
 from .diarize import Diarizer, DiarizerSlot
 from .models import ModelManager
+from .recordings import Recordings
 from .store import Store
 from .worker import GpuWorker
 
@@ -41,6 +42,15 @@ def build(settings: Settings) -> Services:
         allowed_hosts=settings.host_allowlist(),
         open_sessions_file=settings.data_dir / "open-sessions",
         browser_idle_s=settings.browser_idle_s,
+        auto_reprocess=settings.auto_reprocess,
+        recordings=Recordings(
+            settings.data_dir / "recordings",
+            keep_days=settings.recording_keep_days,
+            after_reprocess_days=settings.recording_after_reprocess_days,
+            max_bytes=settings.recording_max_mb * 1024 * 1024,
+        )
+        if settings.record_calls
+        else None,
     )
     if settings.diarization:
         services.diarize_worker = GpuWorker(settings.queue_depth, name="diarize-worker", label="speaker separation")
