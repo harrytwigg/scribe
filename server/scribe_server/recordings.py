@@ -98,7 +98,8 @@ class Recordings:
             folder = self._dir(session_id)
             manifest = self._load(session_id) or {
                 "version": 1, "session_id": session_id, "created_at": time.time(), "finalised_at": None,
-                "reprocessed_at": None, "reprocess_complete": False, "auto_attempts": 0, "channels": {},
+                "reprocessed_at": None, "reprocess_complete": False, "scanned_bytes": None, "auto_attempts": 0,
+                "last_chunk_at": None, "channels": {},
             }
             entry = manifest["channels"].setdefault(channel, {"mime": mime, "sample_rate": sample_rate, "chunks": {}})
             if str(index) in entry["chunks"]:
@@ -114,6 +115,8 @@ class Recordings:
             entry["chunks"][str(index)] = {
                 "file": name, "started_at": float(started_at), "duration_ms": max(int(duration_ms), 0), "bytes": len(data),
             }
+            manifest["last_chunk_at"] = time.time()
+            manifest["reprocess_complete"] = False  # there is audio nobody has been through yet
             self._save(session_id, manifest)
             return True
 
@@ -128,14 +131,16 @@ class Recordings:
             self._save(session_id, manifest)
             return self._summary(manifest)
 
-    def note_reprocess(self, session_id: str, complete: bool, now: float | None = None) -> None:
-        """A reprocess ran; `complete` if it left the call with no gap. Starts the shorter retention."""
+    def note_reprocess(self, session_id: str, complete: bool, scanned_bytes: int | None = None, now: float | None = None) -> None:
+        """A pass over the recording finished; `complete` if it left the call with no gap (which
+        starts the shorter retention), `scanned_bytes` how much audio it had seen."""
         with self._lock:
             manifest = self._load(session_id)
             if manifest is None:
                 return
             manifest["reprocessed_at"] = time.time() if now is None else now
             manifest["reprocess_complete"] = complete
+            manifest["scanned_bytes"] = scanned_bytes
             self._save(session_id, manifest)
 
     def count_auto_attempt(self, session_id: str) -> int:

@@ -61,6 +61,9 @@ label.check { display: inline-flex; gap: 6px; align-items: center; }
 .toolbar h3 button.title { color: var(--text); text-decoration: none; font-weight: 600; }
 .toolbar h3 button.title:hover { text-decoration: underline; }
 .toolbar .state { margin-right: auto; color: var(--muted); }
+.toolbar.recording { margin-top: -4px; font-size: 14px; }
+.toolbar .recording-note { color: var(--accent); }
+.toolbar button:disabled { color: var(--muted); cursor: default; text-decoration: none; }
 .toolbar .state.live { color: #d93025; font-weight: 600; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .file { display: flex; gap: 8px; align-items: center; }

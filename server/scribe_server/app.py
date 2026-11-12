@@ -25,7 +25,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 
 from . import exports, podcast
-from .audio import RATE, AudioError, Vad, decode, speech_chunks, speech_spans, wav_bytes
+from .audio import MAX_CHUNK_S, MIN_SPEECH_S, RATE, AudioError, Vad, decode, speech_chunks, speech_spans, wav_bytes
 from .auth import Auth
 from .diarize import DiarizerSlot, Speaker, SpeakerBook, Turn
 from .models import Conflict, ModelManager, NoActiveModel, NotFound
@@ -1117,12 +1117,60 @@ def create_app(services: Services) -> FastAPI:
         own = [u for u in lines if channel_of(u) == channel and not GAP.match(u["text"])]
         return any("#" in u["speaker_id"] for u in own) if own else channel == "tab"
 
+    async def find_speech(audio: np.ndarray, merged: bool = True) -> list[tuple[int, int]]:
+        """Where the speech in a recording is, in samples: chunks of up to 25 s that keep the
+        pauses between neighbouring speech (what ASR wants), or with `merged` False each stretch
+        of speech on its own. Each window is its own turn at the GPU queue, so a long recording
+        never holds up a live call."""
+        spans: list[tuple[int, int]] = []
+        window = VAD_WINDOW_S * RATE
+        for offset in range(0, len(audio), window):
+            part = audio[offset : offset + window]
+            find = (lambda part=part: speech_spans(part, s.vad)) if merged else (lambda part=part: [sp for sp in s.vad(part) if sp[1] > sp[0]])
+            found = await patient(s.worker, find)
+            spans += [(a + offset, b + offset) for a, b in found]
+        return spans
+
+    def unheard(lines: list[dict], channel: str, spans: list[tuple[int, int]], origin: float) -> list[tuple[int, int]]:
+        """The stretches of speech (as chunks of at most 25 s) that the transcript has nothing
+        for: spans that are mostly uncovered, joined where they are close enough to be one go."""
+        limit, joined = int(MAX_CHUNK_S * RATE), []
+        for a, b in spans:
+            if covered(lines, channel, origin + a / RATE, origin + b / RATE) >= 0.3 * (b - a) / RATE:
+                continue
+            if joined and a - joined[-1][1] <= 1.5 * RATE and b - joined[-1][0] <= limit:
+                joined[-1] = (joined[-1][0], b)
+            else:
+                joined.append((a, b))
+        return [(a, b) for a, b in joined if sum(min(b, y) - max(a, x) for x, y in spans if x < b and y > a) >= MIN_SPEECH_S * RATE]
+
+    def speaker_of(lines: list[dict], channel: str) -> str:
+        """The name a channel's single speaker goes by in this call."""
+        own = [u for u in lines if channel_of(u) == channel and u["speaker_id"] == channel and not GAP.match(u["text"])]
+        return own[0]["speaker_name"] if own else ("Others" if channel == "tab" else "Me")
+
+    def covered(lines: list[dict], channel: str, start: float, end: float) -> float:
+        """Seconds of [start, end] that the channel's transcript lines account for."""
+        spans = sorted(
+            (max(u["started_at"], start), min(u["started_at"] + u["duration_ms"] / 1000, end))
+            for u in lines if channel_of(u) == channel and u["duration_ms"] and not GAP.match(u["text"])
+        )
+        total, cursor = 0.0, start
+        for a, b in spans:
+            a = max(a, cursor)
+            if b > a:
+                total += b - a
+                cursor = b
+        return total
+
     async def reprocess_gaps(job: Job, session_id: str) -> dict:
-        """Replace each [unavailable] line with what the recording says: transcribe the audio of
-        that stretch as a live utterance would have been (the tab split into speakers, which keep
-        the names given in the call), store it, then remove the marker. A marker whose audio is
-        not in the recording stays."""
+        """Fill what the live transcript missed, from the recording. Each [unavailable] line is
+        replaced by the text of its audio, transcribed as a live utterance would have been (the tab
+        split into speakers, which keep the names given in the call). Then each stretch of
+        recorded speech that no line accounts for at all (the server was down and could not even
+        take a marker) is transcribed and added. A marker whose audio is not in the recording stays."""
         rec = s.recordings
+        size = rec.summary(session_id)["bytes"]
         lines = s.store.utterances(session_id)
         markers = gaps_in(lines, rec.summary(session_id)["channels"])
         filled = unrecoverable = failed = added = 0
@@ -1161,9 +1209,39 @@ def create_app(services: Services) -> FastAPI:
             except Exception:
                 log.exception("filling the gap at %s in session %s failed", marker["started_at"], session_id)
                 failed += 1
-            job.stage_progress = number / len(markers)
+            job.stage_progress = 0.5 * number / len(markers)
+
+        # Speech in the recording with nothing in the transcript beside it.
+        found = 0
+        lines = s.store.utterances(session_id)
+        channels = [c for c in CHANNELS if c in rec.summary(session_id)["channels"]]
+        for position, channel in enumerate(channels):
+            got = await asyncio.to_thread(rec.read, session_id, channel)
+            if got is None:
+                continue
+            audio, origin = got
+            name, diarizer = speaker_of(lines, channel), (s.diarization.ready() if is_diarized(lines, channel) else None)
+            for a, b in unheard(lines, channel, await find_speech(audio, merged=False), origin):
+                start = origin + a / RATE
+                key = f"fill:{channel}:{round(start * 100)}"
+                try:
+                    if not has_line(key):
+                        reply = await busy_retry(
+                            lambda: ingest(session_id, audio[a:b], None, channel, name, start, key, diarizer)
+                        )
+                        added += len(reply.get("lines", [reply] if "id" in reply else []))
+                    found += 1
+                except HTTPException:
+                    raise
+                except Exception:
+                    log.exception("transcribing the unheard speech at %s in session %s failed", start, session_id)
+                    failed += 1
+            job.stage_progress = 0.5 + 0.5 * (position + 1) / len(channels)
         remaining = len(gaps_in(s.store.utterances(session_id), rec.summary(session_id)["channels"]))
-        return {"mode": "gaps", "gaps": len(markers), "filled": filled, "unrecoverable": unrecoverable, "failed": failed, "lines": added, "remaining": remaining}
+        return {
+            "mode": "gaps", "gaps": len(markers), "filled": filled, "unrecoverable": unrecoverable, "failed": failed,
+            "unheard": found, "lines": added, "remaining": remaining, "scanned_bytes": size,
+        }
 
     async def reprocess_all(job: Job, session_id: str) -> dict:
         """Transcribe the whole recording again, channel by channel, and replace the transcript of
@@ -1172,6 +1250,7 @@ def create_app(services: Services) -> FastAPI:
         into speakers starts again from none: the names given to its speakers are not kept (they
         belonged to numbers the new run may hand out differently); the mic's are."""
         rec, run = s.recordings, uuid.uuid4().hex[:8]
+        size = rec.summary(session_id)["bytes"]
         channels = [c for c in CHANNELS if c in rec.summary(session_id)["channels"]]
         lines = s.store.utterances(session_id)
         saved = {c: s.store.speaker_rows(session_id, c) for c in channels if is_diarized(lines, c)}
@@ -1186,14 +1265,8 @@ def create_app(services: Services) -> FastAPI:
                 if channel in saved:
                     s.store.replace_speaker_rows(session_id, channel, [])
                     forget(session_id)
-                own = [u for u in lines if channel_of(u) == channel and u["speaker_id"] == channel and not GAP.match(u["text"])]
-                name = own[0]["speaker_name"] if own else ("Others" if channel == "tab" else "Me")
-                spans: list[tuple[int, int]] = []
-                window = VAD_WINDOW_S * RATE
-                for offset in range(0, len(audio), window):
-                    part = audio[offset : offset + window]
-                    found = await patient(s.worker, lambda part=part: speech_spans(part, s.vad))
-                    spans += [(a + offset, b + offset) for a, b in found]
+                name = speaker_of(lines, channel)
+                spans = await find_speech(audio)
                 for number, (a, b) in enumerate(spans, 1):
                     reply = await busy_retry(
                         lambda a=a, b=b: ingest(session_id, audio[a:b], None, channel, name, origin + a / RATE, f"re{run}:{channel}:{a}", diarizer)
@@ -1208,14 +1281,17 @@ def create_app(services: Services) -> FastAPI:
             forget(session_id)
             raise
         forget(session_id)
-        return {"mode": "all", "channels": channels, "lines": added, "remaining": len(gaps_in(s.store.utterances(session_id), channels))}
+        return {
+            "mode": "all", "channels": channels, "lines": added, "scanned_bytes": size,
+            "remaining": len(gaps_in(s.store.utterances(session_id), channels)),
+        }
 
     async def run_reprocess(job: Job, session_id: str, mode: str) -> None:
         try:
             await wait_for_slot(job)
             job.status, job.step = "transcribing", "filling the gaps" if mode == "gaps" else "transcribing the recording"
             job.result = await (reprocess_all(job, session_id) if mode == "all" else reprocess_gaps(job, session_id))
-            s.recordings.note_reprocess(session_id, complete=job.result["remaining"] == 0)
+            s.recordings.note_reprocess(session_id, job.result["remaining"] == 0, job.result["scanned_bytes"])
             job.status, job.stage_progress = "done", 1.0
             log.info("reprocessed session %s (%s): %s", session_id, mode, job.result)
         except asyncio.CancelledError:
@@ -1254,9 +1330,10 @@ def create_app(services: Services) -> FastAPI:
         return job.public(queue_position(job))
 
     async def auto_reprocess() -> None:
-        """Once the server is idle, fill the gaps of a call that ended with some: the point of
-        recording is that nobody has to remember to. A few tries, five minutes apart, because the
-        extension may still be uploading the last of the audio."""
+        """Once the server is idle, go through the recording of a call that has ended: fill what
+        the live transcript missed. The point of recording is that nobody has to remember to.
+        Once per call, and again if more audio arrives afterwards (the extension may still be
+        uploading the last of it, or the server may have been down), a few times at most."""
         if not s.auto_reprocess or s.recordings is None or s.models.active_id is None:
             return
         if s.store.count_open_sessions() or any(j.active for j in jobs.values()):
@@ -1265,20 +1342,19 @@ def create_app(services: Services) -> FastAPI:
         for session_id in s.recordings.sessions():
             manifest = s.recordings.manifest(session_id)
             ended = times.get(session_id)
-            if not manifest or ended is None or now - ended < 60 or manifest.get("reprocess_complete"):
+            if not manifest or ended is None or now - ended < 60 or now - (manifest.get("last_chunk_at") or 0) < 60:
                 continue
             if manifest.get("auto_attempts", 0) >= 4 or now - manifest.get("auto_last", 0) < 300:
                 continue
-            if not gaps_in(s.store.utterances(session_id), manifest["channels"]):
-                continue
+            if manifest.get("scanned_bytes") == s.recordings.summary(session_id)["bytes"]:
+                continue  # nothing new since the last pass
             s.recordings.count_auto_attempt(session_id)
-            log.info("session %s ended with gaps: filling them from its recording", session_id)
+            log.info("session %s has ended: going through its recording for what the transcript missed", session_id)
             try:
                 start_reprocess(session_id, "gaps")
             except HTTPException as error:
                 log.warning("could not start the automatic reprocess of %s: %s", session_id, error.detail)
             return
-
 
     @app.get("/api/sessions/{session_id}/events", dependencies=[Depends(guard)])
     async def session_events(session_id: str, request: Request) -> StreamingResponse:

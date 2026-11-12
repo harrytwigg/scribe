@@ -21,13 +21,13 @@ export class Call {
    * @param {{server: string, myName: string, othersName: string, separateSpeakers?: boolean}} config
    * @param {(status: object) => void} report
    */
-  constructor(config, report, { idleStopMs = 10 * 60_000, uploader, recorderOptions, liveGraceMs = LIVE_GRACE_MS, uploadGraceMs = UPLOAD_GRACE_MS } = {}) {
+  constructor(config, report, { idleStopMs = 10 * 60_000, uploader, recorderOptions, clientOptions, liveGraceMs = LIVE_GRACE_MS, uploadGraceMs = UPLOAD_GRACE_MS } = {}) {
     this.idleStopMs = idleStopMs
     this.liveGraceMs = liveGraceMs
     this.uploadGraceMs = uploadGraceMs
     this.config = config
     this.report = report
-    this.client = new ScribeClient(config.server)
+    this.client = new ScribeClient(config.server, clientOptions)
     // Shared across calls when the document passes one in, so a recording still being delivered
     // outlives the call that made it.
     this.uploader = uploader ?? new ChunkUploader({ clientFor: () => this.client })

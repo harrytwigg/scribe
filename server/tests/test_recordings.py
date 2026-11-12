@@ -2,6 +2,7 @@
 transcription kept up, and a call's gaps filled from it afterwards."""
 
 import io
+import json
 import time
 
 import av
@@ -280,7 +281,9 @@ def test_a_gap_is_replaced_with_what_the_recording_says(harness):
         assert started.status_code == 202 and started.json()["kind"] == "reprocess"
         job = wait(c, started.json()["id"])
     assert job["status"] == "done", job
-    assert job["result"] == {"mode": "gaps", "gaps": 1, "filled": 1, "unrecoverable": 0, "failed": 0, "lines": 1, "remaining": 0}
+    result = job["result"]
+    assert (result["gaps"], result["filled"], result["unrecoverable"], result["failed"]) == (1, 1, 0, 0)
+    assert (result["unheard"], result["lines"], result["remaining"]) == (0, 1, 0)  # the rest was already in the transcript
 
     lines = lines_of(c, sid)
     assert [(u["speaker_id"], u["speaker_name"]) for u in lines] == [("mic", "Harry")] * 3
@@ -325,17 +328,94 @@ def test_a_gap_in_a_split_tab_gets_its_speakers_back(tmp_path):
         h.worker.stop()
 
 
+def test_a_marker_for_an_utterance_the_server_did_serve_after_all_is_just_removed(harness):
+    """The extension gave up on a request that the server then finished: the real line is kept and
+    the marker goes, so the utterance is not in the transcript twice."""
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    live_line(c, sid, "mic", "Harry", T0 + 10, tone(3), f"mic:{T0 + 10}")
+    c.post(f"/api/sessions/{sid}/markers", json={
+        "speaker_id": "mic", "speaker_name": "Harry", "started_at": T0 + 10, "duration_ms": 3000, "client_key": f"mic:{T0 + 10}",
+        "text": "[unavailable: 3 s of audio from Harry]",
+    })
+    put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
+    assert len(lines_of(c, sid)) == 2
+    with c:
+        job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert job["result"]["filled"] == 1 and job["result"]["lines"] == 0
+    assert [u["client_key"] for u in lines_of(c, sid)] == [f"mic:{T0 + 10}"]
+
+
 def test_a_gap_with_no_audio_behind_it_is_left_alone(harness):
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
     marker(c, sid, "mic", "Harry", T0 + 100, 4)  # recorded only to 30 s
-    put(c, sid, "mic", 0, tone(30), T0)
+    live_line(c, sid, "mic", "Harry", T0, tone(25), "mic:0")
+    put(c, sid, "mic", 0, np.concatenate([tone(25), silence(5)]), T0)
     c.post(f"/api/sessions/{sid}/end")
     with c:
         job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
     assert job["result"]["unrecoverable"] == 1 and job["result"]["remaining"] == 1
-    assert [u["text"] for u in lines_of(c, sid)] == ["[unavailable: 4 s of audio from Harry]"]
+    assert [u["text"] for u in lines_of(c, sid)] == ["alpha: 25.0s", "[unavailable: 4 s of audio from Harry]"]
+
+
+def test_speech_the_transcript_never_heard_of_is_found_in_the_recording(harness):
+    """The server was down for a while: no line, and no marker either, since the marker could not
+    be posted. The recording still has the speech, and gap filling finds it."""
+    harness.ready("alpha")
+    c = harness.client
+    sid = new_call(c)
+    live_line(c, sid, "mic", "Harry", T0 + 2, tone(3), "mic:2")
+    live_line(c, sid, "mic", "Harry", T0 + 60, tone(3), "mic:60")
+    # Speech at 2 s and 60 s were heard live; the stretch at 20 s and the one at 40 s were not.
+    track = np.concatenate([silence(2), tone(3), silence(15), tone(4), silence(16), tone(2), silence(18), tone(3), silence(2)])
+    put(c, sid, "mic", 0, track[: 30 * RATE], T0)
+    put(c, sid, "mic", 1, track[30 * RATE :], T0 + 30)
+    with c:
+        job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert job["result"]["gaps"] == 0 and job["result"]["unheard"] == 2 and job["result"]["lines"] == 2
+    lines = lines_of(c, sid)
+    assert [round(u["started_at"] - T0) for u in lines] == [2, 20, 40, 60]
+    assert {u["speaker_id"] for u in lines} == {"mic"} and {u["speaker_name"] for u in lines} == {"Harry"}
+    # Nothing is left to find, so another pass adds nothing.
+    with c:
+        again = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
+    assert again["result"]["unheard"] == 0 and len(lines_of(c, sid)) == 4
+
+
+def test_an_idle_server_goes_through_a_call_again_only_when_more_audio_has_arrived(harness, tmp_path):
+    harness.ready("alpha")
+    c, app = harness.client, harness.app
+    sid = new_call(c)
+    put(c, sid, "mic", 0, np.concatenate([silence(2), tone(3), silence(2)]), T0)
+    c.post(f"/api/sessions/{sid}/end")
+    harness.services.store._exec("update sessions set ended_at = ended_at - 120 where id = ?", sid)
+    manifest = lambda: json.loads((tmp_path / "recordings" / sid / "manifest.json").read_text())  # noqa: E731
+
+    def pass_over():
+        """Let an idle server decide whether to go through the recording, and wait for it."""
+        age_last_chunk(tmp_path, sid, 400)
+        data = manifest()
+        data["auto_last"] = 0
+        (tmp_path / "recordings" / sid / "manifest.json").write_text(json.dumps(data))
+        c.portal.call(app.state.auto_reprocess)
+        deadline = time.monotonic() + 10
+        while (t := c.get("/api/status").json()["transcriptions"])["running"] + t["queued"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+
+    with c:
+        c.post(f"/api/sessions/{sid}/end")
+        pass_over()
+        assert len(lines_of(c, sid)) == 1 and manifest()["auto_attempts"] == 1 and manifest()["reprocess_complete"] is True
+        pass_over()  # nothing new: it does not go through the same audio again
+        assert manifest()["auto_attempts"] == 1
+        put(c, sid, "mic", 1, np.concatenate([tone(3), silence(2)]), T0 + 30)  # the extension caught up
+        assert manifest()["reprocess_complete"] is False
+        pass_over()
+        assert manifest()["auto_attempts"] == 2 and len(lines_of(c, sid)) == 2
 
 
 def test_an_old_marker_without_a_duration_is_found_by_its_text(harness):
@@ -408,7 +488,14 @@ def test_a_failed_reprocess_all_leaves_the_transcript_as_it_was(harness):
 # -- on its own, when idle ---------------------------------------------------------------------
 
 
-def test_an_ended_call_with_gaps_is_filled_when_the_server_is_idle(harness):
+def age_last_chunk(tmp_path, sid, seconds):
+    path = tmp_path / "recordings" / sid / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["last_chunk_at"] -= seconds
+    path.write_text(json.dumps(manifest))
+
+
+def test_an_ended_call_with_gaps_is_filled_when_the_server_is_idle(harness, tmp_path):
     harness.ready("alpha")
     c = harness.client
     app = harness.app
@@ -421,6 +508,7 @@ def test_an_ended_call_with_gaps_is_filled_when_the_server_is_idle(harness):
         assert lines_of(c, sid)[0]["text"].startswith("[unavailable")
         c.post(f"/api/sessions/{sid}/end")
         harness.services.store._exec("update sessions set ended_at = ended_at - 120 where id = ?", sid)
+        age_last_chunk(tmp_path, sid, 120)
         c.portal.call(app.state.auto_reprocess)
         deadline = time.monotonic() + 10
         while lines_of(c, sid)[0]["text"].startswith("[unavailable"):

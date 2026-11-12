@@ -66,7 +66,7 @@ export function stop() {
   return call?.stop()
 }
 
-globalThis.scribe = { start, stop }
+globalThis.scribe = { start, stop, uploader }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message.target !== 'offscreen') return
