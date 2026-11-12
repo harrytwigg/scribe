@@ -22,6 +22,13 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
    to rename them for that session.
 5. **Try it** transcribes a file with the active model, to compare models on the same clip. Tick
    **Separate speakers** to have a recording split into Speaker 1, 2, ...
+6. A call transcribed by the Chrome extension is also **recorded**: each channel's audio is uploaded
+   to the server as the call runs (Opus, about 22 MB an hour for both channels), so a slow or
+   unreachable server never costs the audio. When the live transcript has gaps, the server fills
+   them from the recording by itself once it is idle, or press **Fill gaps from the recording**
+   in History (`scribe reprocess <id>`; **Transcribe it again** redoes the lot). The audio is
+   deleted after two weeks, or three days once nothing is missing; `docs/spec.md` 4.4 has the
+   settings, including turning recording off.
 
 ### Podcasts and recordings
 
@@ -74,7 +81,8 @@ pnpm e2e                          # two replayed speakers through the bot pipeli
 pnpm build && node dist/src/smoke.js   # live: join an empty voice channel (DAVE handshake), leave
 
 cd extension && npm test          # unit tests (Node 22, no dependencies)
-cd server && uv run pytest -m extension -s   # the extension in Chromium into a real GPU server
+cd server && uv run pytest -m extension -s   # the extension in Chromium into a real GPU server, and a
+                                              # call recorded through a starved or stopped server
 ```
 
 `pnpm e2e` replays audio after `receiver.subscribe`: it does not exercise Discord's transport, DAVE

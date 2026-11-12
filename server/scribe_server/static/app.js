@@ -248,7 +248,7 @@ class Viewer {
     const ended = s.ended_at != null;
     const busy = r.job != null || this.working;
     const channels = Object.entries(r.channels).map(([name, c]) => `${name} ${clock((c.ended_at ?? 0) - (c.started_at ?? 0))}`).join(', ');
-    this.recording.replaceChildren(
+    this.recording.replaceChildren(...[
       el('small', { class: 'state' },
         `Audio kept: ${channels}, ${(r.bytes / 1048576).toFixed(1)} MB.`,
         r.gaps ? ` ${r.gaps} gap${r.gaps === 1 ? '' : 's'} in the transcript.` : ''),
@@ -256,7 +256,7 @@ class Viewer {
       ended && r.gaps ? el('button', { disabled: busy, title: 'Transcribe the audio of each [unavailable] line and put the text in its place', onclick: () => reprocessSession(s.id, 'gaps') }, 'Fill gaps from the recording') : null,
       ended ? el('button', { disabled: busy, title: 'Transcribe the whole recording again, replacing this transcript', onclick: () => reprocessSession(s.id, 'all') }, 'Transcribe it again') : null,
       ...Object.keys(r.channels).map((name) => el('a', { href: `/api/sessions/${s.id}/recording/${name}/audio`, title: `The ${name} audio as one WAV file` }, `${name} audio`)),
-    );
+    ].filter(Boolean));
   }
 
   retitle(id, title) {

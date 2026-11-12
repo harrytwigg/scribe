@@ -24,6 +24,8 @@ scribe-server`) with a model active (the default, Parakeet, is activated at star
 | `scribe resolve LINK` | Print the episode a link names and its audio URL as JSON. `--list` lists the show's newest episodes. Downloads nothing. |
 | `scribe download LINK --out DIR` | Download the audio only; prints the file's path. |
 | `scribe status` | The server's state as JSON: active model, queue depth. |
+| `scribe recording SESSION` | What is recorded of a browser call (docs/spec.md, 4.4): segments, size and time per channel, and how many `[unavailable]` gaps its transcript has. |
+| `scribe reprocess SESSION [--all]` | Fill those gaps from the recording and wait for it, printing the result as JSON; `--all` transcribes the whole recording again and replaces the transcript; `--no-wait` just starts it. SESSION is the id in the call's address in the GUI (`#history/<id>`). |
 
 **SOURCE** (or LINK) is any of:
 
