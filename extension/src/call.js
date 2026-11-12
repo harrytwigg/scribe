@@ -1,21 +1,40 @@
 // One transcribed call: the tab's audio ("them") and the mic ("me") as two channels, each cut into
 // utterances and posted to the scribe server (docs/spec.md, 4). Runs in the offscreen document.
+//
+// Each channel is also recorded whole (recorder.js) and uploaded as it goes (uploader.js), on a
+// path of its own: a server too busy to transcribe still keeps the audio, and the gaps in the
+// transcript are filled from it afterwards.
 
 import { ScribeClient, ServerError } from './client.js'
+import { ChannelRecorder } from './recorder.js'
 import { RATE, Segmenter } from './segmenter.js'
+import { ChunkUploader } from './uploader.js'
 
 const HEARTBEAT_MS = 30_000
+// When the call ends, utterances still being retried get this long before they become markers.
+const LIVE_GRACE_MS = 30_000
+// And the recording this long to reach the server; what is left is kept and sent later.
+const UPLOAD_GRACE_MS = 15_000
 
 export class Call {
   /**
    * @param {{server: string, myName: string, othersName: string, separateSpeakers?: boolean}} config
    * @param {(status: object) => void} report
    */
-  constructor(config, report, { idleStopMs = 10 * 60_000 } = {}) {
+  constructor(config, report, { idleStopMs = 10 * 60_000, uploader, recorderOptions, clientOptions, liveGraceMs = LIVE_GRACE_MS, uploadGraceMs = UPLOAD_GRACE_MS } = {}) {
     this.idleStopMs = idleStopMs
+    this.liveGraceMs = liveGraceMs
+    this.uploadGraceMs = uploadGraceMs
     this.config = config
     this.report = report
-    this.client = new ScribeClient(config.server)
+    this.client = new ScribeClient(config.server, clientOptions)
+    // Shared across calls when the document passes one in, so a recording still being delivered
+    // outlives the call that made it.
+    this.uploader = uploader ?? new ChunkUploader({ clientFor: () => this.client })
+    this.recorderOptions = recorderOptions
+    this.recorders = []
+    this.adding = new Set() // segments being written to local storage
+    this.giveUp = new AbortController() // ends the waiting on a busy server when the call is over
     this.contexts = []
     this.inflight = new Set()
     this.lines = 0
@@ -72,7 +91,27 @@ export class Call {
     }
   }
 
+  /** Start recording a channel. The call carries on without a recording if the browser cannot. */
+  record(stream, channel) {
+    try {
+      const recorder = new ChannelRecorder(stream, channel, (segment) => {
+        const adding = this.uploader.add(this.config.server, this.sessionId, segment).catch(() => {})
+        this.adding.add(adding)
+        adding.finally(() => this.adding.delete(adding))
+      }, this.recorderOptions)
+      recorder.start()
+      this.recorders.push(recorder)
+    } catch (error) {
+      this.recordingError = `not recording the ${channel}: ${error.message}`
+    }
+  }
+
   async capture(streams) {
+    // First, so the recording starts with the call and not after the audio worklets have loaded.
+    if (this.config.record !== false) {
+      this.record(streams.tab, 'tab')
+      if (streams.mic) this.record(streams.mic, 'mic')
+    }
     // Capturing a tab silences it for the user, so play it back.
     const playback = new AudioContext()
     playback.createMediaStreamSource(streams.tab).connect(playback.destination)
@@ -103,9 +142,11 @@ export class Call {
   }
 
   post(speaker, samples, startedAt) {
-    const job = this.client.postUtterance(this.sessionId, speaker, samples, startedAt).then((result) => {
+    // Speech was heard, whether or not the server manages to transcribe it: a call on a struggling
+    // server is not a silent one (and must not be ended as if it were).
+    this.heard = Date.now()
+    const job = this.client.postUtterance(this.sessionId, speaker, samples, startedAt, { signal: this.giveUp.signal }).then((result) => {
       if (result.ok && result.text) {
-        this.heard = Date.now()
         this.lines += result.lines.length || 1
         const line = result.lines.at(-1)
         this.last = `${line?.speaker_name ?? speaker.name}: ${line?.text ?? result.text}`
@@ -119,7 +160,8 @@ export class Call {
     job.finally(() => this.inflight.delete(job))
   }
 
-  publish(state) {
+  publish(state = this.state) {
+    this.state = state
     this.report({
       state,
       sessionId: this.sessionId,
@@ -128,6 +170,9 @@ export class Call {
       last: this.last,
       error: this.error,
       reason: this.reason,
+      recording: this.recorders.length > 0,
+      recordingError: this.recordingError ?? this.uploader.lastError ?? undefined,
+      pendingChunks: this.uploader.pending,
     })
   }
 
@@ -136,13 +181,23 @@ export class Call {
     this.stopping ??= (async () => {
       clearInterval(this.timer)
       this.publish('stopping')
+      // Recorders first: they hand over their last segment when stopped, before the tracks end.
+      await Promise.all(this.recorders.map((recorder) => recorder.stop().catch(() => {})))
       for (const stream of Object.values(this.streams ?? {})) stream?.getTracks().forEach((track) => track.stop())
       await Promise.all(this.contexts.map((context) => context.close().catch(() => {})))
       // Let audio already posted from the worklet arrive, then cut what is left.
       await new Promise((resolve) => setTimeout(resolve, 100))
       for (const tap of this.taps ?? []) tap.port.onmessage = null
       for (const segmenter of this.segmenters ?? []) segmenter.flush()
-      await Promise.allSettled([...this.inflight])
+      // Utterances a struggling server is still working on get a little longer; after that they
+      // become markers, which the server fills from the recording.
+      const settled = Promise.allSettled([...this.inflight])
+      await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, this.liveGraceMs))])
+      this.giveUp.abort()
+      await settled
+      // The recording gets a moment too; what is left stays in local storage and is sent later.
+      await Promise.allSettled([...this.adding]) // the last segment must be stored (or sent) before anything waits on the queue
+      await this.uploader.whenIdle(this.uploadGraceMs)
       if (this.sessionId) await this.client.endSession(this.sessionId).catch((error) => (this.error = error.message))
       this.done = true
       this.publish('stopped')

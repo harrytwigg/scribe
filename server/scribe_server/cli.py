@@ -450,11 +450,43 @@ def cmd_status(args) -> int:
     return OK
 
 
+def cmd_recording(args) -> int:
+    """What is recorded of a browser call, and how many gaps its transcript has."""
+    server = Server(server_url(args.server))
+    print(json.dumps(server.call("GET", f"/api/sessions/{args.session}/recording"), indent=2))
+    return OK
+
+
+def cmd_reprocess(args) -> int:
+    """Fill a call's gaps from its recording (or all of it again) and wait for the result."""
+    server = Server(server_url(args.server))
+    job = server.call(
+        "POST", f"/api/sessions/{args.session}/reprocess", body=json.dumps({"mode": "all" if args.all else "gaps"}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    if args.no_wait:
+        print(json.dumps(job, indent=2))
+        return OK
+    say(f"reprocessing {args.session} ({'all of it' if args.all else 'the gaps'})", args.quiet)
+    last = ""
+    while job["status"] in ("queued", "fetching", "decoding", "transcribing"):
+        time.sleep(1)
+        job = server.call("GET", f"/api/transcriptions/{job['id']}")
+        progress = f"{job['progress'] * 100:.0f}%"
+        if progress != last:
+            say(progress, args.quiet)
+            last = progress
+    if job["status"] != "done":
+        raise CliError(f"reprocessing failed: {job.get('error') or job['status']}", FAILED, "failed")
+    print(json.dumps(job["result"], indent=2))
+    return OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scribe", description=DESCRIPTION, epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    commands = parser.add_subparsers(dest="command", required=True, metavar="{transcribe,resolve,download,status}")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="{transcribe,resolve,download,status,recording,reprocess}")
 
     def common(sub, server=True):
         sub.add_argument("-q", "--quiet", action="store_true", help="no progress on stderr")
@@ -496,6 +528,22 @@ def build_parser() -> argparse.ArgumentParser:
     s = commands.add_parser("status", help="show the server's state: active model, queue")
     common(s)
     s.set_defaults(run=cmd_status)
+
+    rec = commands.add_parser("recording", help="show what is recorded of a browser call (segments, size, gaps in its transcript)")
+    rec.add_argument("session", metavar="SESSION", help="the call's id (the last part of its address in the GUI)")
+    common(rec)
+    rec.set_defaults(run=cmd_recording)
+
+    rp = commands.add_parser(
+        "reprocess", help="fill the gaps in a browser call's transcript from its recording",
+        description="Transcribe the recorded audio behind each [unavailable] line of a call and put the text in its place, "
+        "with the speakers the call had. --all transcribes the whole recording again instead and replaces the transcript.",
+    )
+    rp.add_argument("session", metavar="SESSION", help="the call's id")
+    rp.add_argument("--all", action="store_true", help="transcribe the whole recording again, replacing the transcript")
+    rp.add_argument("--no-wait", action="store_true", help="start it and print the job instead of waiting for it")
+    common(rp)
+    rp.set_defaults(run=cmd_reprocess)
     return parser
 
 

@@ -224,7 +224,9 @@ SQLite at `data/scribe.db`: `sessions(id, source, guild, channel, started_at, en
 `utterances(id, session_id, speaker_id, speaker_name, started_at, duration_ms, text, model_id,
 asr_ms, client_key)`, `speakers(session_id, speaker_id, name, voice, weight)` (names given in
 the GUI, and diarized speakers' average voices, 3.8), `optouts(source, user_id)`. Audio is **not** retained by default (`SCRIBE_KEEP_AUDIO`
-stores WAVs under `data/audio/` for debugging). Transcripts are kept until deleted (H4).
+stores WAVs under `data/audio/` for debugging), with one exception: the audio of browser calls is
+recorded under `data/recordings/` so a failed transcript can be redone (4.4). Transcripts are kept
+until deleted (H4).
 
 ### 3.6 Running
 
@@ -353,14 +355,19 @@ and the user's mic in their own browser and posts utterances to the server like 
    segmenter cuts utterances with the bot's rules: 800 ms silence, 25 s cap, 400 ms minimum. Speech
    is energy 12 dB above the channel's noise floor, the quietest 20 ms of the last 10 s. The server
    still runs Silero VAD on every utterance.
-4. Utterances go to `POST /api/sessions/{id}/utterances` with the bot's retry, idempotency key and
-   marker behaviour, in a `browser` session titled after the tab. The tab is speaker `tab`
+4. Utterances go to `POST /api/sessions/{id}/utterances` with the bot's idempotency key and marker
+   behaviour, in a `browser` session titled after the tab. A busy server is waited on for about
+   five minutes (1, 3, 5, 10, 15, then 30 s apart) rather than the bot's 4 s, and what is still
+   undelivered then becomes a marker that carries its length, which the server fills from the
+   recording (4.4). The tab is speaker `tab`
    ("Others" by default) and the mic `mic` ("Me"), so "me" vs "them" needs no diarization. The tab
    channel is then diarized on the server (3.8) into "Speaker 1", "Speaker 2", ... (setting
    "Tell the other side's speakers apart", on by default).
 5. A call ends on **Stop**, when the tab closes, when a new document loads in the captured tab
    (`webNavigation.onCommitted`; capture itself survives navigation), or after 10 minutes with no
-   transcribed line on either channel (leaving a Meet call can keep the tab open). Same-document
+   speech heard on either channel (leaving a Meet call can keep the tab open). Speech counts as
+   heard when it is cut, whether or not the server managed to transcribe it, so a call on a
+   struggling server is not mistaken for a silent one. Same-document
    URL changes (`history.pushState`, `#fragment`) do not end it: Meet makes them mid-call. The
    idle stop also ends a call after any 10-minute lull (a break, a silent screen-share); the badge
    clears and the popup says why. Ending waits for the last utterances, then ends the session.
@@ -369,6 +376,7 @@ and the user's mic in their own browser and posts utterances to the server like 
    because a browser that quits or crashes mid-call never ends its own. Otherwise an orphan would
    show as live forever and keep `open-sessions` above zero. A call whose session the server
    ended (after the laptop slept, say) stops itself at the next heartbeat.
+7. Alongside all of that, each channel is recorded whole and uploaded as the call runs (4.4).
 
 **Why HTTP utterances and not the WebSocket stream planned earlier:** the bot's ingestion path,
 idempotency and retries are reused unchanged, the server gains no streaming code, and it works
@@ -405,6 +413,88 @@ names from Meet's own speaker UI would need a content script on meet.google.com 
 extension, so Meet's own echo cancellation may no longer recognise it. On speakers, the others
 could hear themselves echo, and the mic could repeat the call as "Me" lines. Both are unverified;
 the first live call on speakers should ask the far side. The mic can be turned off in settings.
+
+### 4.4 Recording the call, and filling its gaps
+
+On 12 Nov 2026 a 40-minute call was transcribed live on a laptop that was saturated by other work.
+Transcription slowed from about 1 s to 6 s, the queue filled and answered 503, the extension
+retried for 4 s and discarded the audio, and 128 of 341 lines were `[unavailable]`. The audio only
+ever existed in memory. So the audio is now kept, on a path that does not depend on transcription.
+
+**Recording (extension).** The offscreen document runs a `MediaRecorder` on each of the two
+streams (`recorder.js`), separate from the AudioWorklet that feeds the segmenter, so it adds nothing
+to the time a line takes. Opus in WebM at 24 kbit/s (about 11 MB an hour per channel). Every 30 s the
+recorder is replaced by a new one that starts 0.4 s before the old one stops, so each segment is a
+complete file that decodes on its own and no audio falls between two. A segment carries the
+wall-clock time its recorder started. Chrome 116 or later (the manifest's minimum).
+
+**Delivery (extension).** `uploader.js` writes each segment to IndexedDB, then `PUT`s it, and
+deletes it only when the server has acknowledged it. A busy or absent server is retried with a
+growing wait (1, 2, 5, 10, 30, then every 60 s) for as long as it takes; a 400, 403, 404 or 413 is
+final (the call was deleted, recording is off, the segment is malformed). The uploader belongs to
+the offscreen document, not to a call: when a call ends, the document is kept open
+(`background.js`) until the server has every segment, the popup says how many are left, and
+whatever an earlier document or a browser restart left behind is sent on the next load. Segments a
+week old are dropped. Ending a call waits at most 30 s for utterances still being retried (they
+become markers) and 15 s for the recording, then ends the session regardless.
+
+**Storage (server, `recordings.py`).** `PUT /api/sessions/{id}/recording/{tab|mic}/{index}`
+(body = the file, `Content-Type` its format, `?started_at=&duration_ms=&sample_rate=`) writes
+`data/recordings/<session id>/<channel>/<index>.webm` and records it in `manifest.json` (session,
+per channel the format and each segment's file, start time, length and size). It runs no model and
+uses no queue, so it answers while transcription is refusing (tested with the queue full). It is
+idempotent on the index: the first copy stored wins, a repeat answers 200 `created: false`, and a
+file the manifest does not list (a crash between the write and the manifest) is registered by the
+retry. Segments are accepted after the call has ended. Ending the session (or the reaper ending it)
+stamps the manifest `finalised_at`; the parts are kept as they are, not concatenated.
+`GET /api/sessions/{id}/recording` summarises it (per channel: segments, bytes, time covered, missing
+indexes; the transcript's gap count) and `GET .../recording/{channel}/audio` returns a channel as
+one 16 kHz WAV, silence where a segment is missing. `GET /api/sessions/{id}` carries the summary as
+`recording`.
+
+**Filling the gaps.** `POST /api/sessions/{id}/reprocess` (`{"mode": "gaps"}`, the default, or
+`"all"`) starts a job, polled at `GET /api/transcriptions/{id}` like an upload (and counted in the
+same slots, so it queues behind them). Audio is read back by wall-clock time and goes through the same
+`ingest` a live utterance does: ASR, and for a diarized tab the speaker book (3.8), loaded from the
+store, so speaker ids and the names given in the GUI carry on. A full queue is waited out rather than
+failed, so it yields to a live call.
+- `gaps`: each `[unavailable: N s of audio from X]` line (the extension now sends its length and the
+  key of the utterance it stands for; older ones are read from the text) is replaced by the text of
+  its audio, at the right place in the order; a marker whose audio the recording does not have stays,
+  and one whose utterance the server did serve after all is simply removed. Then each stretch of
+  recorded speech (Silero VAD) that no transcript line accounts for is transcribed and added: that
+  is the call during which the server was down, when no marker could be posted either. The channel
+  is judged diarized from its existing lines (the tab with none is).
+- `all`: transcribe the whole recording again and replace the transcript of each recorded channel.
+  Refused (409) while the call is still open, and when the recording does not cover every line of
+  the transcript (a segment never arrived): replacing would lose those lines, and gap filling is the
+  way then. The new lines are stored first and the old removed at the end, so a failure or cancel
+  leaves the transcript as it was (speaker names and voices included). A diarized tab starts again
+  from no speakers, so names given to its speakers are not kept; the mic's are.
+Both are careful about audio they cannot use: a segment that cannot be decoded is not taken for
+quiet. A marker whose audio it overlaps stays (and `all` fails), and the pass does not count as
+complete. A fill is stored under the key of the utterance it stands for, so if the live request the
+extension gave up on is served late after all, the transcript keeps one copy. Only a pass that
+leaves nothing undone (no marker standing, no failure, nothing unreadable) starts the shorter
+retention and stops the automatic pass; anything else is tried again.
+Once the server has no open call and no job running, it does the `gaps` pass itself on each ended
+call whose recording it has not been through (`SCRIBE_AUTO_REPROCESS`, on by default): at least 60 s
+after the call and after the last segment arrived, five minutes apart, at most four times, and again
+only if more audio has arrived. The GUI's History view shows what is kept and has **Fill gaps from
+the recording**, **Transcribe it again** and download links; the CLI has `scribe recording` and
+`scribe reprocess` (docs/cli.md).
+
+**Privacy and retention.** The audio is raw call audio on the server's disk, inside the data
+directory, reachable only as the rest of the API is (the server listens on named addresses, 3.7).
+Recording is off with `SCRIBE_RECORD_CALLS=0`, or at run time while the browser opt-out `recording`
+is set (`POST /api/optouts {"source": "browser", "user_id": "recording", "opted_out": true}`), and
+the extension has a setting to not record. Either way the server answers 403 and the extension stops
+sending. Opt-outs of Discord users are untouched: the bot never sends recordings. Audio is deleted
+`SCRIBE_RECORDING_KEEP_DAYS` (14) after the call ended, or `SCRIBE_RECORDING_AFTER_REPROCESS_DAYS`
+(3) after a pass that left no gap; with the session; and oldest first whenever the recordings
+together pass `SCRIBE_RECORDING_MAX_MB` (10240). Checked at start and hourly. An open call's audio
+is never deleted. Speaker separation threads default to half the cores (at most 8), so a laptop
+keeps some for the call itself (`SCRIBE_DIARIZATION_THREADS`).
 
 ## 5. Model options and defaults
 

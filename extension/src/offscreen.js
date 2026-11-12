@@ -2,12 +2,34 @@
 // stopped when idle. Only chrome.runtime is available here, so the background passes everything in.
 
 import { Call } from './call.js'
+import { ScribeClient } from './client.js'
+import { ChunkUploader, idbChunkStore, memoryChunkStore } from './uploader.js'
 
 let call = null
+let lastStatus = null
+
+// The recording's segments outlive any one call: they are delivered from here until the server has
+// them, and this document is kept open (background.js) while any are left.
+const uploader = new ChunkUploader({
+  clientFor: (server) => new ScribeClient(server),
+  store: typeof indexedDB === 'undefined' ? memoryChunkStore() : idbChunkStore(),
+})
 
 function report(status) {
-  chrome.runtime.sendMessage({ type: 'status', status }).catch(() => {})
+  lastStatus = status
+  chrome.runtime.sendMessage({ type: 'status', status: { ...status, pendingChunks: uploader.pending } }).catch(() => {})
 }
+
+// Progress of a recording still being delivered shows in the popup, and the end of it lets the
+// background close this document.
+uploader.onChange = () => {
+  if (call && !call.done && call.state) call.publish()
+  else if (lastStatus?.state === 'stopped') report(lastStatus)
+}
+uploader.onIdle = () => {
+  if (lastStatus?.state === 'stopped') report(lastStatus)
+}
+uploader.resume().catch(() => {}) // from a call whose document closed, or a browser that quit, before delivering
 
 /** Opens the captured tab and, if allowed, the mic. */
 async function streams(tabStreamId, useMic) {
@@ -31,7 +53,7 @@ async function streams(tabStreamId, useMic) {
 /** Starts a call from the given streams; the e2e test calls this directly with its own. */
 export async function start(config, title, media, options) {
   if (call && !call.done) throw new Error(call.stopping ? 'still finishing the last call: try again in a moment' : 'already transcribing')
-  call = new Call(config, (status) => report({ ...status, warning: media.warning, server: config.server, title }), options)
+  call = new Call(config, (status) => report({ ...status, warning: media.warning, server: config.server, title }), { uploader, ...options })
   try {
     await call.start(title, { tab: media.tab, mic: media.mic })
   } catch (error) {
@@ -44,7 +66,7 @@ export function stop() {
   return call?.stop()
 }
 
-globalThis.scribe = { start, stop }
+globalThis.scribe = { start, stop, uploader }
 
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message.target !== 'offscreen') return
@@ -60,7 +82,7 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     return true
   }
   if (message.type === 'idle') {
-    respond({ idle: !call || call.done })
+    respond({ idle: !call || call.done, uploading: uploader.pending })
     return
   }
   if (message.type === 'stop') {

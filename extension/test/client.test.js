@@ -72,3 +72,52 @@ test('wav header and clipping', () => {
   assert.equal(view.getUint32(40, true), 8)
   assert.deepEqual([1, 2, 3].map((i) => view.getInt16(44 + i * 2, true)), [32767, -32768, 32767])
 })
+
+test('a busy server is waited on for about five minutes before the audio is given up on', async () => {
+  const { LIVE_RETRY_DELAYS_MS } = await import('../src/client.js')
+  const total = LIVE_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0)
+  assert.ok(total >= 270_000 && total <= 330_000, `waits ${total / 1000} s`)
+  assert.equal(new ScribeClient('http://box:8787').retryDelaysMs, LIVE_RETRY_DELAYS_MS)
+})
+
+test('a request timeout and a throttled server are retried', async () => {
+  const server = fakeServer([[408, {}], [429, {}], [201, { text: 'hi' }]])
+  const client = new ScribeClient('http://box:8787', { retryDelaysMs: [1, 1], fetch: server.fetch })
+  assert.equal((await client.postUtterance('s1', speaker, new Float32Array(1600), 1)).ok, true)
+  assert.equal(server.calls.length, 3)
+})
+
+test('the marker for a lost utterance says how long it was and which utterance it stands for', async () => {
+  const server = fakeServer([[503, {}], [201, {}]])
+  const client = new ScribeClient('http://box:8787', { retryDelaysMs: [], fetch: server.fetch })
+  await client.postUtterance('s1', speaker, new Float32Array(40_000), 100.5)
+  const body = JSON.parse(server.calls.at(-1).init.body)
+  assert.deepEqual(body, {
+    speaker_id: 'tab', speaker_name: 'Others', started_at: 100.5, text: '[unavailable: 3 s of audio from Others]',
+    duration_ms: 2500, client_key: 'tab:100.5',
+  })
+})
+
+test('when the call is over the waiting stops and the gap is marked at once', async () => {
+  const server = fakeServer([[503, {}], [201, {}]])
+  const client = new ScribeClient('http://box:8787', { retryDelaysMs: [60_000, 60_000], fetch: server.fetch })
+  const stop = new AbortController()
+  const result = client.postUtterance('s1', speaker, new Float32Array(16000), 1, { signal: stop.signal })
+  await new Promise((resolve) => setTimeout(resolve, 20)) // it is now waiting a minute to retry
+  stop.abort()
+  assert.equal((await result).ok, false)
+  assert.equal(server.calls.length, 2)
+  assert.match(server.calls[1].url, /\/markers$/)
+})
+
+test('a recording segment is put at its place with its start time and length', async () => {
+  const server = fakeServer([[201, { created: true }]])
+  const client = new ScribeClient('http://box:8787', { fetch: server.fetch })
+  const blob = new Blob(['abc'])
+  assert.deepEqual(await client.putRecordingChunk('s1', 'mic', 7, { blob, mime: 'audio/webm;codecs=opus', startedAt: 1800000000.25, durationMs: 30400.4, sampleRate: 48000 }), { created: true })
+  const { url, init } = server.calls[0]
+  assert.equal(url, 'http://box:8787/api/sessions/s1/recording/mic/7?started_at=1800000000.25&duration_ms=30400&sample_rate=48000')
+  assert.equal(init.method, 'PUT')
+  assert.equal(init.headers['Content-Type'], 'audio/webm;codecs=opus')
+  assert.equal(init.body, blob)
+})

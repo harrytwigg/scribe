@@ -7,12 +7,11 @@ function render(status = { state: 'idle' }) {
   $('#state').textContent = status.state === 'recording' ? '● recording' : status.state
   $('#state').dataset.state = status.state
   $('#title').textContent = busy ? status.title ?? '' : ''
+  const uploading = status.pendingChunks ? `${status.recording === false ? '' : 'recording: '}${status.pendingChunks} part${status.pendingChunks === 1 ? '' : 's'} still uploading` : ''
   $('#detail').textContent = busy
-    ? `${status.lines ?? 0} lines${status.failed ? `, ${status.failed} undelivered` : ''}${status.last ? ` · ${status.last}` : ''}`
-    : status.reason
-      ? `Stopped: ${status.reason}.`
-      : ''
-  const problem = status.error ?? (busy ? status.warning : null)
+    ? `${status.lines ?? 0} lines${status.failed ? `, ${status.failed} undelivered` : ''}${uploading ? ` · ${uploading}` : ''}${status.last ? ` · ${status.last}` : ''}`
+    : [status.reason ? `Stopped: ${status.reason}.` : '', uploading ? `Still uploading the call's ${uploading}.` : ''].filter(Boolean).join(' ')
+  const problem = status.error ?? status.recordingError ?? (busy ? status.warning : null)
   $('#error').hidden = !problem
   $('#error').textContent = problem ?? ''
   $('#start').hidden = busy

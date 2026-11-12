@@ -281,3 +281,24 @@ def test_a_bad_speaker_count_is_a_usage_error_before_the_server_is_contacted(mon
     path.write_bytes(AUDIO)
     for count in ("0", "21", "-3"):
         assert run(capsys, "transcribe", str(path), f"--num-speakers={count}")[0] == 2
+
+
+def test_reprocess_fills_the_gaps_of_a_recorded_call(served, capsys):
+    from .test_recordings import T0, marker, new_call, put
+
+    c = served.client
+    sid = new_call(c)
+    marker(c, sid, "mic", "Harry", T0 + 10, 3)
+    put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
+
+    code, out, _ = run(capsys, "recording", sid)
+    assert code == 0 and json.loads(out)["gaps"] == 1 and json.loads(out)["channels"]["mic"]["chunks"] == 1
+    code, out, err = run(capsys, "reprocess", sid)
+    assert code == 0, err
+    assert json.loads(out)["filled"] == 1 and json.loads(out)["remaining"] == 0
+    assert [u["text"].split(":")[0] for u in c.get(f"/api/sessions/{sid}").json()["utterances"]] == ["alpha"]
+
+    code, _, err = run(capsys, "reprocess", "000000000000")
+    assert code == 6 and "no such session" in err
+    code, _, err = run(capsys, "recording", new_call(c))
+    assert code == 6 and "no recording" in err

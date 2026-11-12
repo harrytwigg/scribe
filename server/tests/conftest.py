@@ -11,6 +11,7 @@ from scribe_server.audio import RATE, wav_bytes
 from scribe_server.auth import Auth
 from scribe_server.catalogue import CatalogueEntry
 from scribe_server.models import ModelManager
+from scribe_server.recordings import Recordings
 from scribe_server.store import Store
 from scribe_server.worker import GpuWorker
 
@@ -124,7 +125,7 @@ class Harness:
         self.worker = GpuWorker(depth=4)
         self.services = Services(
             models=self.models, store=Store(tmp_path / "scribe.db"), worker=self.worker,
-            vad=energy_vad, auth=Auth(),
+            vad=energy_vad, auth=Auth(), recordings=Recordings(tmp_path / "recordings"),
         )
         self.app = create_app(self.services)
         self.client = TestClient(self.app)

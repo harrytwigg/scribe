@@ -110,7 +110,7 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         # The manifest's public key pins the ID, and so the origin the server admits.
         assert worker.url.startswith(f"chrome-extension://{EXTENSION_ID}/")
         config = {
-            "server": server, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": True,
+            "server": server, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": True, "record": True,
         }
 
         # Settings: saved through the options page, which tests the connection.

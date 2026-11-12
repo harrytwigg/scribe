@@ -59,6 +59,9 @@ async function onStatus(status) {
   if (!reply?.idle) return
   await setStatus(status)
   await chrome.storage.session.remove('capturedTab')
+  // The call is over, but its recording may not have all reached the server yet: the document
+  // keeps delivering it, and reports again when it is done.
+  if (reply.uploading) return
   await chrome.offscreen.closeDocument().catch(() => {})
 }
 

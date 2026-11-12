@@ -221,8 +221,9 @@ class Viewer {
     this.session = session;
     this.ids = new Set();
     this.header = el('div', { class: 'toolbar' });
+    this.recording = el('div', { class: 'toolbar recording' });
     this.lines = el('div', { class: 'lines' }, el('p', { class: 'hint' }, 'No lines yet.'));
-    this.box.replaceChildren(this.header, this.lines);
+    this.box.replaceChildren(this.header, this.recording, this.lines);
     this.renderHeader();
     this.merge(session.utterances);
     if (session.ended_at == null) this.follow();
@@ -236,6 +237,26 @@ class Viewer {
       el('small', { class: s.ended_at == null ? 'state live' : 'state' }, s.ended_at == null ? '● live' : `ended ${when(s.ended_at)}`),
       ...this.tools(s),
     );
+    this.renderRecording();
+  }
+
+  /** The call's recording, if it has one: what is kept, and the buttons that redo the transcript from it. */
+  renderRecording(note = this.note) {
+    this.note = note;
+    const s = this.session, r = s.recording;
+    if (!r) return this.recording.replaceChildren();
+    const ended = s.ended_at != null;
+    const busy = r.job != null || this.working;
+    const channels = Object.entries(r.channels).map(([name, c]) => `${name} ${clock((c.ended_at ?? 0) - (c.started_at ?? 0))}`).join(', ');
+    this.recording.replaceChildren(...[
+      el('small', { class: 'state' },
+        `Audio kept: ${channels}, ${(r.bytes / 1048576).toFixed(1)} MB.`,
+        r.gaps ? ` ${r.gaps} gap${r.gaps === 1 ? '' : 's'} in the transcript.` : ''),
+      note ? el('small', { class: 'recording-note' }, note) : null,
+      ended && r.gaps ? el('button', { disabled: busy, title: 'Transcribe the audio of each [unavailable] line and put the text in its place', onclick: () => reprocessSession(s.id, 'gaps') }, 'Fill gaps from the recording') : null,
+      ended ? el('button', { disabled: busy, title: 'Transcribe the whole recording again, replacing this transcript', onclick: () => reprocessSession(s.id, 'all') }, 'Transcribe it again') : null,
+      ...Object.keys(r.channels).map((name) => el('a', { href: `/api/sessions/${s.id}/recording/${name}/audio`, title: `The ${name} audio as one WAV file` }, `${name} audio`)),
+    ].filter(Boolean));
   }
 
   retitle(id, title) {
@@ -291,6 +312,8 @@ class Viewer {
     }
     if (this.session?.id !== id) return;
     if (s.title !== this.session.title) this.retitle(id, s.title);
+    this.session.recording = s.recording;
+    this.renderRecording();
     this.merge(s.utterances);
     // Speakers renamed while the stream was down.
     for (const [speakerId, name] of Object.entries(s.speakers ?? {})) showSpeakerName(this.box, speakerId, name);
@@ -361,6 +384,34 @@ const historyViewer = new Viewer($('#history-view'), {
     el('button', { onclick: () => removeSession(s.id) }, 'Delete'),
   ],
 });
+
+/** Fill a call's gaps from its recording, or transcribe all of it again, and show the result. */
+async function reprocessSession(id, mode) {
+  if (mode === 'all' && !confirm('Transcribe the whole recording again? The new transcript replaces this one (nothing is replaced unless the recording covers it). Names given to the other side\'s speakers are not kept.')) return;
+  const viewer = historyViewer;
+  const note = (text) => viewer.session?.id === id && viewer.renderRecording(text);
+  viewer.working = true;
+  note('Starting…');
+  try {
+    let job = await api(`/api/sessions/${id}/reprocess`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }),
+    });
+    while (['queued', 'fetching', 'decoding', 'transcribing'].includes(job.status)) {
+      note(job.status === 'queued' ? 'Waiting its turn…' : `Transcribing… ${Math.round(job.progress * 100)}%`);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      job = await api(`/api/transcriptions/${job.id}`);
+    }
+    viewer.working = false;
+    const r = job.result ?? {};
+    const text = job.status !== 'done' ? `Failed: ${job.error ?? job.status}`
+      : mode === 'all' ? `Done: ${r.lines} lines from the recording.`
+      : `Done: ${r.filled} of ${r.gaps} gaps filled${r.unrecoverable ? `, ${r.unrecoverable} with no audio` : ''}${r.failed ? `, ${r.failed} failed` : ''}.`;
+    if (viewer.session?.id === id) { await viewer.open(id); note(text); }
+  } catch (error) {
+    viewer.working = false;
+    note(`Failed: ${error.message}`);
+  }
+}
 
 async function removeSession(id) {
   if (!confirm('Delete this transcript?')) return;
