@@ -1091,7 +1091,10 @@ def create_app(services: Services) -> FastAPI:
         session_or_404(session_id)
         if s.recordings is None or channel not in CHANNELS:
             raise HTTPException(404, "no such recording")
-        got = await asyncio.to_thread(s.recordings.read, session_id, channel, start, end)
+        try:
+            got = await asyncio.to_thread(s.recordings.read, session_id, channel, start, end)
+        except RecordingError as error:
+            raise HTTPException(400, str(error)) from error
         if got is None:
             raise HTTPException(404, "no such recording")
         audio, origin = got

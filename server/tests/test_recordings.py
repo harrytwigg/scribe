@@ -228,6 +228,8 @@ def test_segments_are_placed_by_time_and_a_missing_one_is_silence(harness):
     assert rms(samples[2 * RATE : 8 * RATE]) > 0.15
     assert rms(samples[11 * RATE : 19 * RATE]) < 0.001
     assert rms(samples[22 * RATE : 28 * RATE]) > 0.15
+    assert c.get(f"/api/sessions/{sid}/recording/mic/audio", params={"start": T0, "end": T0 + 1e9}).status_code == 400
+    assert c.get(f"/api/sessions/{sid}/recording/speaker/audio").status_code == 404
     got = c.get(f"/api/sessions/{sid}/recording/mic/audio", params={"start": T0 + 8, "end": T0 + 12}).content
     cut, _ = soundfile.read(io.BytesIO(got), dtype="float32")
     assert abs(len(cut) / RATE - 4) < 0.01 and rms(cut[: 2 * RATE]) > 0.15 and rms(cut[2 * RATE + 400 :]) < 0.001

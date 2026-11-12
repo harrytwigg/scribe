@@ -14,6 +14,8 @@ The fake engine stands in for the model, so this needs no GPU; Chromium does the
     uv run pytest -m extension tests/test_extension_recording.py -s
 """
 
+import base64
+import contextlib
 import io
 import socket
 import threading
@@ -93,16 +95,13 @@ def served(tmp_path):
     harness.worker.stop()
 
 
-def call_in_chromium(tmp_path, served, during, *, retry_ms=(200, 400)):
-    """Run a call of CALL_S seconds in the extension's offscreen document. `during(elapsed)` is
-    called about every second, to break things. Returns the session id."""
-    import httpx
+@contextlib.contextmanager
+def chromium(tmp_path):
+    """Chromium with the extension loaded and a fake mic playing tone bursts."""
     from playwright.sync_api import sync_playwright
 
     mic_clip = tmp_path / "mic.wav"
     mic_clip.write_bytes(bursts(330, 0.9, 1.1))
-    tab_clip = bursts(220, 1.2, 0.9)
-    config = {"server": served.url, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": False, "record": True}
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             str(tmp_path / "profile"), channel="chromium", headless=True,
@@ -114,44 +113,74 @@ def call_in_chromium(tmp_path, served, during, *, retry_ms=(200, 400)):
         )
         worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
         assert worker.url.startswith(f"chrome-extension://{EXTENSION_ID}/")
-        page = context.new_page()
-        page.goto(f"chrome-extension://{EXTENSION_ID}/src/offscreen.html")
-        page.locator("script[src='offscreen.js']").wait_for(state="attached")
-        for _ in range(100):
-            if page.evaluate("Boolean(globalThis.scribe)"):
-                break
-            time.sleep(0.1)
-        began = time.time()
-        page.evaluate(
-            """async ([config, clip, retry, segmentMs]) => {
-                const bytes = Uint8Array.from(atob(clip), (c) => c.charCodeAt(0))
-                const audio = new Audio(URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' })))
-                audio.loop = true
-                await audio.play()
-                const tab = audio.captureStream()
-                const mic = await navigator.mediaDevices.getUserMedia({ audio: true })
-                await globalThis.scribe.start(config, 'Meet - test', { tab, mic }, {
-                  clientOptions: { retryDelaysMs: retry },
-                  recorderOptions: { segmentMs },
-                })
-            }""",
-            [config, __import__("base64").b64encode(tab_clip).decode(), list(retry_ms), SEGMENT_MS],
-        )
+        try:
+            yield context
+        finally:
+            context.close()
+
+
+def offscreen(context):
+    """The extension's offscreen document, loaded as a page, ready to start a call."""
+    page = context.new_page()
+    page.goto(f"chrome-extension://{EXTENSION_ID}/src/offscreen.html")
+    page.locator("script[src='offscreen.js']").wait_for(state="attached")
+    for _ in range(100):
+        if page.evaluate("Boolean(globalThis.scribe)"):
+            return page
+        time.sleep(0.1)
+    raise AssertionError("the offscreen document never loaded")
+
+
+def begin(page, served, retry_ms=(200, 400)):
+    """Start a call (the tab is a looping tone-burst clip, the mic Chromium's fake one); returns when."""
+    config = {"server": served.url, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": False, "record": True}
+    began = time.time()
+    page.evaluate(
+        """async ([config, clip, retry, segmentMs]) => {
+            const bytes = Uint8Array.from(atob(clip), (c) => c.charCodeAt(0))
+            const audio = new Audio(URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' })))
+            audio.loop = true
+            await audio.play()
+            const tab = audio.captureStream()
+            const mic = await navigator.mediaDevices.getUserMedia({ audio: true })
+            await globalThis.scribe.start(config, 'Meet - test', { tab, mic }, {
+              clientOptions: { retryDelaysMs: retry },
+              recorderOptions: { segmentMs },
+            })
+        }""",
+        [config, base64.b64encode(bursts(220, 1.2, 0.9)).decode(), list(retry_ms), SEGMENT_MS],
+    )
+    return began
+
+
+def uploaded(page, timeout_s=50):
+    """Wait for the document to have delivered every segment."""
+    for _ in range(timeout_s * 4):
+        if page.evaluate("globalThis.scribe.uploader.pending") == 0:
+            return
+        time.sleep(0.25)
+    raise AssertionError("the recording never finished uploading")
+
+
+def browser_session(served):
+    import httpx
+
+    return next(s for s in httpx.Client(base_url=served.url).get("/api/sessions").json() if s["source"] == "browser")["id"]
+
+
+def call_in_chromium(tmp_path, served, during, *, retry_ms=(200, 400)):
+    """Run a call of CALL_S seconds in the extension's offscreen document. `during(elapsed)` is
+    called about every second, to break things. Returns the session id and when the call began and ended."""
+    with chromium(tmp_path) as context:
+        page = offscreen(context)
+        began = begin(page, served, retry_ms)
         while (elapsed := time.time() - began) < CALL_S:
             during(elapsed)
             time.sleep(1)
         ended = time.time()
         page.evaluate("globalThis.scribe.stop()")  # returns once the call has drained, which can take a while
-        # The document stays until every segment has reached the server.
-        for _ in range(200):
-            if page.evaluate("globalThis.scribe.uploader.pending") == 0:
-                break
-            time.sleep(0.25)
-        assert page.evaluate("globalThis.scribe.uploader.pending") == 0, "the recording never finished uploading"
-        context.close()
-    api = httpx.Client(base_url=served.url)
-    session = next(s for s in api.get("/api/sessions").json() if s["source"] == "browser")
-    return session["id"], began, ended
+        uploaded(page)  # the document stays until every segment has reached the server
+    return browser_session(served), began, ended
 
 
 def recorded(api, sid, channel):
@@ -254,3 +283,23 @@ def test_a_server_stopped_mid_call_loses_no_audio_and_the_transcript_is_filled_a
     covered = [u for u in after if 8 < u["started_at"] - began < 20]
     assert covered, "the transcript still has a hole where the server was down"
     assert "[unavailable" not in export
+
+
+def test_a_server_down_when_the_call_ends_gets_the_recording_from_a_later_document(tmp_path, served):
+    """The segments the server could not take are kept in the browser's own storage. If the
+    document that held them goes away (Chrome closes it, the browser quits), the next one delivers them."""
+    with chromium(tmp_path) as context:
+        page = offscreen(context)
+        began = begin(page, served)
+        time.sleep(10)
+        served.stop()  # down for the rest of the call and the end of it
+        time.sleep(CALL_S - (time.time() - began))
+        ended = time.time()
+        page.evaluate("globalThis.scribe.stop()")
+        left = page.evaluate("globalThis.scribe.uploader.pending")
+        assert left >= 3, f"only {left} segments were waiting: the server was not down long enough"
+        page.close()  # the document is gone, and with it everything in memory
+        served.start()
+        later = offscreen(context)  # loading it picks up what the first left in IndexedDB
+        uploaded(later)
+    check_recording_whole(served, browser_session(served), began, ended)

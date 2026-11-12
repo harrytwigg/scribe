@@ -23,7 +23,7 @@ function report(status) {
 // Progress of a recording still being delivered shows in the popup, and the end of it lets the
 // background close this document.
 uploader.onChange = () => {
-  if (call && !call.done) call.publish()
+  if (call && !call.done && call.state) call.publish()
   else if (lastStatus?.state === 'stopped') report(lastStatus)
 }
 uploader.onIdle = () => {

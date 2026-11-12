@@ -28,6 +28,7 @@ log = logging.getLogger("scribe.recordings")
 CHANNELS = ("tab", "mic")
 MAX_INDEX = 99_999
 MAX_CHUNK_BYTES = 32 * 1024 * 1024
+MAX_READ_S = 12 * 3600  # the most one read returns
 SUFFIXES = {"audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "audio/wav": ".wav", "audio/x-wav": ".wav"}
 SESSION_ID = re.compile(r"^[0-9a-f]{12}$")
 DAY = 86400.0
@@ -235,6 +236,8 @@ class Recordings:
             return None
         origin = spans[0][0] if start is None else start
         stop = max(e for _, e, _ in spans) if end is None else end
+        if stop - origin > MAX_READ_S:
+            raise RecordingError(f"that is more than {MAX_READ_S // 3600} hours of audio")
         buffer = np.zeros(max(int((stop - origin) * RATE), 0) + RATE, dtype=np.float32)
         top = 0
         for a, b, chunk in spans:
