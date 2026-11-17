@@ -1,13 +1,13 @@
 # scribe: self-hosted call transcription
 
-Status: phase 0 built and tested; phase 1 deployed on harry-box with the live receive test outstanding (section 7). 2026-10-12.
+Status: phase 0 built and tested; phase 1 deployed on scribe-host with the live receive test outstanding (section 7). 2026-10-12.
 
 ## 1. Goal
 
-A transcription service Harry controls end to end. A Discord bot joins a voice channel and
-transcribes each speaker; the speech recognition (ASR) runs on harry-box's GPU; a web GUI picks
+A transcription service the owner controls end to end. A Discord bot joins a voice channel and
+transcribes each speaker; the speech recognition (ASR) runs on scribe-host's GPU; a web GUI picks
 the ASR model from a catalogue of open-source models, Handy-style, and shows live and past
-transcripts. Off-the-shelf bots (Scripty, which Harry uses today) fix the model; this one does not.
+transcripts. Off-the-shelf bots (Scripty, which the owner uses today) fix the model; this one does not.
 
 Google Meet and other browser calls come later, through a Chrome extension.
 
@@ -39,7 +39,7 @@ Full notes with sources: `docs/research/discord.md` and `docs/research/asr.md`.
 
 ### ASR: both model families run in one Python process on the Turing GPU
 
-Measured on harry-box (Quadro RTX 5000, 16 GB, compute 7.5), 11 s clip, warm:
+Measured on scribe-host (Quadro RTX 5000, 16 GB, compute 7.5), 11 s clip, warm:
 
 | Model | Runtime | Time | Result |
 | --- | --- | --- | --- |
@@ -81,10 +81,10 @@ test has transcribed the reference clip with it.
 ## 3. Architecture
 
 ```
- Discord voice (DAVE, UDP)                       Harry's browser (tailnet)
+ Discord voice (DAVE, UDP)                       the operator's browser (tailnet)
           |                                               |
           v                                               v
- +------------------ harry-box ---------------------------------------+
+ +------------------ scribe-host ---------------------------------------+
  |  bot (Node 22, discord.js)  --HTTP-->  server (Python 3.12, FastAPI)|
  |   per-user Opus -> PCM                 /v1/audio/transcriptions     |
  |   utterance segmentation               /api/models (catalogue)      |
@@ -103,7 +103,7 @@ test has transcribed the reference clip with it.
 
 A Discord bot makes only outbound connections (the gateway websocket and the voice UDP socket), so
 **the MVP needs no public endpoint, tunnel or webhook**. The GUI is reached over the tailnet
-(`http://harry-box:8787`, or HTTPS via `tailscale serve`), behind the server's own auth (3.7).
+(`http://scribe-host:8787`, or HTTPS via `tailscale serve`), behind the server's own auth (3.7).
 
 Public ingress matters only for clients that are not on the tailnet, mainly the Chrome extension
 on a machine where Tailscale cannot be installed. For those, phase 2 uses the existing **tools**
@@ -113,13 +113,13 @@ already has a public address, so no Cloudflare tunnel is needed:
 - The tools host joins the tailnet with a **tagged, pre-authorised auth key** (`tag:tools-edge`),
   node-key expiry disabled for that tagged node so the edge does not silently drop off, and the
   auth key itself short-lived (single use).
-- The tailnet policy lets `tag:tools-edge` reach only `harry-box:8787`. If the tailnet still runs
+- The tailnet policy lets `tag:tools-edge` reach only `scribe-host:8787`. If the tailnet still runs
   the default allow-all policy, that restriction means writing explicit grants for every other
   device: a **tailnet-wide policy change**, not a one-line addition.
 - A new tools workload adds the edge site `scribe.<domain>`, reverse-proxied to
-  `harry-box.<tailnet>.ts.net:8787`. The server has no auth of its own (3.7), so the edge would have to supply it (an access policy in front of the site); that is part of the decision.
+  `scribe-host.<tailnet>.ts.net:8787`. The server has no auth of its own (3.7), so the edge would have to supply it (an access policy in front of the site); that is part of the decision.
 
-This is a public-exposure decision and needs Harry (H3).
+This is a public-exposure decision and needs the owner (H3).
 
 ### 3.2 Audio pipeline (Discord)
 
@@ -230,27 +230,27 @@ until deleted (H4).
 
 ### 3.6 Running
 
-Two systemd `--user` units on harry-box, `scribe-server` and `scribe-bot`. The server binds
+Two systemd `--user` units on scribe-host, `scribe-server` and `scribe-bot`. The server binds
 `127.0.0.1` and the tailnet address only. The bot's server URL is configurable, so the bot can move
 host (H5) without code changes.
 
 Secrets (the bot token) are read at start from the instance's
 `secrets/api-keys.json` on the mounted instance home, never copied into the repo or a unit file.
 
-**harry-box powers itself off when idle** (the `harrybox-auto-shutdown` cron, which probes the box
-over one ssh call in `bin/harrybox-idle-check.sh`). Making it scribe-aware, a `curl` of
+**scribe-host powers itself off when idle** (the `host auto-shutdown` cron, which probes the box
+over one ssh call in `bin/idle-check.sh`). Making it scribe-aware, a `curl` of
 `localhost:8787/api/status` inside that probe plus a test case in its harness, is a **company
 infrastructure change**, reviewed on its own, not part of this repo. Whether the bot should be
 reachable while the box is off is H5.
 
 ### 3.7 Auth (from phase 0)
 
-- **There is no API token or sign-in** (Harry, 2026-10-24; it began as a bearer token plus a GUI
+- **There is no API token or sign-in** (owner decision, 2026-10-24; it began as a bearer token plus a GUI
   session cookie, and `SCRIBE_TRUST_LOCALHOST` had already exempted the machine itself). Who may
   use the server is decided by who can reach it: it listens only on the addresses in `SCRIBE_HOST`
-  (loopback and the tailnet address on harry-box), each written as an IP address; it refuses every
+  (loopback and the tailnet address on scribe-host), each written as an IP address; it refuses every
   spelling of "all interfaces" (`0.0.0.0`, `::`, `0`, `::ffff:0.0.0.0`, ...) and names. Every machine on
-  the tailnet, and every process on harry-box including agent sessions, can read History (call
+  the tailnet, and every process on scribe-host including agent sessions, can read History (call
   transcripts), start transcriptions (including ones that make the server fetch a public URL, which
   `POST /api/transcriptions/link` does with private addresses refused) and change models. Keep it off any network that is not trusted.
 - What is still checked, for browsers: a state-changing request carrying an `Origin` that is not the
@@ -389,7 +389,7 @@ fixed by the public `key` in the manifest: the unpacked extension has ID
 `mcnpmckibkddnnenfondlblnddldonfm` on every machine. A web page cannot send that origin; any other
 extension's origin is refused.
 
-**Reach.** The host permissions cover `harry-box`, `*.ts.net`, `localhost` and `127.0.0.1`. Any
+**Reach.** The host permissions cover `scribe-host`, `*.ts.net`, `localhost` and `127.0.0.1`. Any
 other server URL (the phase-2 public domain) is requested as an optional permission when it is
 saved in the settings.
 
@@ -398,13 +398,13 @@ and no web API tells a page that its tab is being captured or that another page 
 The extension injects nothing into meet.google.com: no content script, no web-accessible
 resources. So Meet has no known way to detect it, other participants get no "recording" notice
 (that comes only from Meet's own recording or transcription), and no audio goes to Google: it goes
-to harry-box over the tailnet. Three things can show:
-- Chrome's own indicators on Harry's screen: the tab's capture icon, and the mic in use.
-- Echo heard by the far side if Harry is on speakers (above).
+to scribe-host over the tailnet. Three things can show:
+- Chrome's own indicators on the user's screen: the tab's capture icon, and the mic in use.
+- Echo heard by the far side if the user is on speakers (above).
 - On a Google Workspace managed browser or profile, the admin can list installed extensions and can
   block developer-mode extensions or tab capture by policy.
 
-Not being detectable is not consent. Telling people remains Harry's call, and the popup says so.
+Not being detectable is not consent. Telling people remains the owner's call, and the popup says so.
 
 **Limits.** Meet mixes everyone on the far side into the tab's audio, so telling them apart is
 diarization (3.8), which numbers them; their names are given by renaming in the GUI. Reading
@@ -527,10 +527,10 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 
 ## 7. Phased plan
 
-| Phase | Scope | Needs Harry |
+| Phase | Scope | Needs the owner |
 | --- | --- | --- |
-| 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on harry-box. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | Done |
-| 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on harry-box. Then a soak test; a dedicated Discord application (H1); and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call; the application (H1) |
+| 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on scribe-host. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | Done |
+| 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on scribe-host. Then a soak test; a dedicated Discord application (H1); and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call; the application (H1) |
 | 2 | Public ingress via the tools host + tailnet policy | H3 |
 | 3 | Chrome extension for Meet / any browser call (4): built and tested in Chromium; the first real Meet call is the live test | Load it unpacked and try a call; H3 if off the tailnet |
 | 4 | Diarization for single-stream sources (built: 3.8; a live Meet call is its real test), LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
@@ -547,11 +547,11 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
   on every bump.
 - **Consent and policy.** The bot announces itself (nickname, channel message, re-notice for late
   joiners), anyone can stop it, users can opt out, transcripts stay off Discord by default, audio is
-  not kept. Not legal advice; Harry decides where it is used (H2).
+  not kept. Not legal advice; the owner decides where it is used (H2).
 - **GPU stack fragility.** CTranslate2 and onnxruntime both need CUDA 12 / cuDNN 9; pin
   onnxruntime-gpu 1.24.4 and the pip CUDA libraries together. A future ORT move to CUDA 13 must
   move both.
-- **harry-box availability.** It is off most of the time; see H5.
+- **scribe-host availability.** It is off most of the time; see H5.
 - **Extension echo and attribution.** On speakers, the far side may hear an echo and the mic may
   repeat the call as "Me" lines, so use headphones until a live test says otherwise. All remote
   speakers share one label (4).
@@ -562,21 +562,21 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 
 ## 9. Decisions
 
-Harry asked for the build to go ahead without further questions (2026-10-12). The recommended
+The owner asked for the build to go ahead without further questions (2026-10-12). The recommended
 option was taken for H2 to H5. **H1 deviates from its recommendation**, because the recommended
-option needs Harry's own hands. Any can be revisited.
+option needs the owner's own hands. Any can be revisited.
 
-- **H1 Bot identity: the existing bot application, for now** ("Longbow Dev", user "Harry test"),
+- **H1 Bot identity: the existing bot application, for now** ("Scribe Dev", user "Scribe test"),
   whose token is already in the instance's secrets file (`DISCORD_BOT_TOKEN`). A dedicated
-  application (the recommendation) has to be created in Harry's Discord Developer Portal, which an
+  application (the recommendation) has to be created in the owner's Discord Developer Portal, which an
   agent cannot do. The existing application also holds the Message Content Intent, which scribe
   does not need. The bot reads its token under `SCRIBE_DISCORD_TOKEN_KEY`, so moving to a dedicated
   application is a config change (phase 1).
-- **H2 Where: the Longbow server**, slash commands registered there only (`SCRIBE_GUILD_ID`). The
+- **H2 Where: the Discord server**, slash commands registered there only (`SCRIBE_GUILD_ID`). The
   notice, nickname and `/scribe optout` are the consent mechanism; transcripts are not echoed into
   Discord (`SCRIBE_ECHO` off).
 - **H3 Ingress: tailnet-only.** Public exposure is not needed for the Discord path (3.1). The tools
   host route stays the plan for phase 3, when the Chrome extension needs off-tailnet access.
 - **H4 Retention: no audio kept; transcripts kept until deleted** in the GUI.
-- **H5 Availability: on demand.** harry-box must be on for a call; both services start at boot. An
+- **H5 Availability: on demand.** scribe-host must be on for a call; both services start at boot. An
   always-on bot host is phase 4.

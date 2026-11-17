@@ -186,10 +186,10 @@ def test_the_server_refuses_to_listen_on_every_interface():
             default_model="", queue_depth=1,
         )
 
-    settings("127.0.0.1", "100.76.208.67", "::1", "localhost").check()  # named addresses are fine
+    settings("127.0.0.1", "100.64.0.1", "::1", "localhost").check()  # named addresses are fine
     # Every way of writing "all interfaces" that the socket layer accepts, and some it does not.
     wide = ["0.0.0.0", "::", "0", "0.0", "00.0.0.0", "::0", "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0", "<any>", "<broadcast>",
-            "255.255.255.255", "*", "", "harry-box", "224.0.0.1"]
+            "255.255.255.255", "*", "", "scribe-host", "224.0.0.1"]
     for host in wide:
         with pytest.raises(SystemExit, match="no API token"):
             settings(host).check()
@@ -334,11 +334,11 @@ def test_unknown_host_refused(tmp_path):
     from .conftest import Harness
 
     h = Harness(tmp_path)
-    h.services.allowed_hosts = ["127.0.0.1", "harry-box", "*.ts.net"]
+    h.services.allowed_hosts = ["127.0.0.1", "scribe-host", "*.ts.net"]
     c = TestClient(create_app(h.services))
     assert c.get("/api/models", headers={"Host": "attacker.example"}).status_code == 400
-    assert c.get("/api/models", headers={"Host": "harry-box:8787"}).status_code == 200
-    assert c.get("/api/models", headers={"Host": "harry-box.tail1234.ts.net"}).status_code == 200
+    assert c.get("/api/models", headers={"Host": "scribe-host:8787"}).status_code == 200
+    assert c.get("/api/models", headers={"Host": "scribe-host.tail1234.ts.net"}).status_code == 200
     h.worker.stop()
 
 

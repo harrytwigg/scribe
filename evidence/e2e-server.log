@@ -1,4 +1,4 @@
-2026-10-12 23:33:12,676 WARNING scribe.models: another scribe server uses /home/harry/.local/share/scribe/models; leaving partial downloads alone
+2026-10-12 23:33:12,676 WARNING scribe.models: another scribe server uses /home/user/.local/share/scribe/models; leaving partial downloads alone
 2026-10-12 23:33:12,911 INFO scribe: listening on 127.0.0.1 port 45951
 INFO:     Started server process [111456]
 INFO:     Waiting for application startup.

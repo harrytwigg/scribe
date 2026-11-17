@@ -1,6 +1,6 @@
 $ vitest run --config vitest.e2e.config.ts
 
- RUN  v3.2.7 /srv/jinn-work/main/scribe-mvp/bot
+ RUN  v3.2.7 /path/to/scribe/bot
 
 stdout | test/scribe.e2e.test.ts > replayed call -> bot pipeline -> scribe server > transcribes two overlapping speakers, with a model swap mid-call
 Ada [parakeet-tdt-0.6b-v2] And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.

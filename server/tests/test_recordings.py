@@ -202,7 +202,7 @@ def test_storing_needs_no_model_and_no_queue(harness):
             time.sleep(0.01)
         for _ in range(harness.worker._queue.maxsize):  # and the queue is full behind it
             harness.worker.submit(lambda: gate.wait(10))
-        busy = live_line_raw(c, sid, "mic", "Harry", T0, tone(2), "mic:0")
+        busy = live_line_raw(c, sid, "mic", "Alice", T0, tone(2), "mic:0")
         assert busy.status_code == 503 and busy.headers["retry-after"] == "1"
         assert put(c, sid, "mic", 0, tone(2), T0).status_code == 201
         assert put(c, sid, "tab", 0, tone(2), T0).status_code == 201
@@ -267,10 +267,10 @@ def test_a_gap_is_replaced_with_what_the_recording_says(harness):
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    # The call: Harry spoke at 5 s (heard live), at 20 s (lost), at 40 s (heard live).
-    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
-    live_line(c, sid, "mic", "Harry", T0 + 40, tone(2), "mic:40")
-    marker(c, sid, "mic", "Harry", T0 + 20, 4)
+    # The call: Alice spoke at 5 s (heard live), at 20 s (lost), at 40 s (heard live).
+    live_line(c, sid, "mic", "Alice", T0 + 5, tone(3), "mic:5")
+    live_line(c, sid, "mic", "Alice", T0 + 40, tone(2), "mic:40")
+    marker(c, sid, "mic", "Alice", T0 + 20, 4)
     # The recording has all of it: speech at 5, 20 and 40 s, in two segments.
     track = np.concatenate([silence(5), tone(3), silence(12), tone(4), silence(16), tone(2), silence(3)])
     put(c, sid, "mic", 0, track[: 30 * RATE], T0)
@@ -288,7 +288,7 @@ def test_a_gap_is_replaced_with_what_the_recording_says(harness):
     assert (result["unheard"], result["lines"], result["remaining"]) == (0, 1, 0)  # the rest was already in the transcript
 
     lines = lines_of(c, sid)
-    assert [(u["speaker_id"], u["speaker_name"]) for u in lines] == [("mic", "Harry")] * 3
+    assert [(u["speaker_id"], u["speaker_name"]) for u in lines] == [("mic", "Alice")] * 3
     assert [round(u["started_at"] - T0) for u in lines] == [5, 20, 40]  # in order, the new one between
     assert lines[1]["text"].startswith("alpha: 4.")  # transcribed from the 4 s of audio
     export = c.get(f"/api/sessions/{sid}/export").text
@@ -336,10 +336,10 @@ def test_a_marker_for_an_utterance_the_server_did_serve_after_all_is_just_remove
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    live_line(c, sid, "mic", "Harry", T0 + 10, tone(3), f"mic:{T0 + 10}")
+    live_line(c, sid, "mic", "Alice", T0 + 10, tone(3), f"mic:{T0 + 10}")
     c.post(f"/api/sessions/{sid}/markers", json={
-        "speaker_id": "mic", "speaker_name": "Harry", "started_at": T0 + 10, "duration_ms": 3000, "client_key": f"mic:{T0 + 10}",
-        "text": "[unavailable: 3 s of audio from Harry]",
+        "speaker_id": "mic", "speaker_name": "Alice", "started_at": T0 + 10, "duration_ms": 3000, "client_key": f"mic:{T0 + 10}",
+        "text": "[unavailable: 3 s of audio from Alice]",
     })
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
     assert len(lines_of(c, sid)) == 2
@@ -353,14 +353,14 @@ def test_a_gap_with_no_audio_behind_it_is_left_alone(harness):
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    marker(c, sid, "mic", "Harry", T0 + 100, 4)  # recorded only to 30 s
-    live_line(c, sid, "mic", "Harry", T0, tone(25), "mic:0")
+    marker(c, sid, "mic", "Alice", T0 + 100, 4)  # recorded only to 30 s
+    live_line(c, sid, "mic", "Alice", T0, tone(25), "mic:0")
     put(c, sid, "mic", 0, np.concatenate([tone(25), silence(5)]), T0)
     c.post(f"/api/sessions/{sid}/end")
     with c:
         job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
     assert job["result"]["unrecoverable"] == 1 and job["result"]["remaining"] == 1
-    assert [u["text"] for u in lines_of(c, sid)] == ["alpha: 25.0s", "[unavailable: 4 s of audio from Harry]"]
+    assert [u["text"] for u in lines_of(c, sid)] == ["alpha: 25.0s", "[unavailable: 4 s of audio from Alice]"]
 
 
 def test_speech_the_transcript_never_heard_of_is_found_in_the_recording(harness):
@@ -369,8 +369,8 @@ def test_speech_the_transcript_never_heard_of_is_found_in_the_recording(harness)
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    live_line(c, sid, "mic", "Harry", T0 + 2, tone(3), "mic:2")
-    live_line(c, sid, "mic", "Harry", T0 + 60, tone(3), "mic:60")
+    live_line(c, sid, "mic", "Alice", T0 + 2, tone(3), "mic:2")
+    live_line(c, sid, "mic", "Alice", T0 + 60, tone(3), "mic:60")
     # Speech at 2 s and 60 s were heard live; the stretch at 20 s and the one at 40 s were not.
     track = np.concatenate([silence(2), tone(3), silence(15), tone(4), silence(16), tone(2), silence(18), tone(3), silence(2)])
     put(c, sid, "mic", 0, track[: 30 * RATE], T0)
@@ -380,7 +380,7 @@ def test_speech_the_transcript_never_heard_of_is_found_in_the_recording(harness)
     assert job["result"]["gaps"] == 0 and job["result"]["unheard"] == 2 and job["result"]["lines"] == 2
     lines = lines_of(c, sid)
     assert [round(u["started_at"] - T0) for u in lines] == [2, 20, 40, 60]
-    assert {u["speaker_id"] for u in lines} == {"mic"} and {u["speaker_name"] for u in lines} == {"Harry"}
+    assert {u["speaker_id"] for u in lines} == {"mic"} and {u["speaker_name"] for u in lines} == {"Alice"}
     # Nothing is left to find, so another pass adds nothing.
     with c:
         again = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
@@ -425,7 +425,7 @@ def test_an_old_marker_without_a_duration_is_found_by_its_text(harness):
     c = harness.client
     sid = new_call(c)
     c.post(f"/api/sessions/{sid}/markers", json={
-        "speaker_id": "mic", "speaker_name": "Harry", "started_at": T0 + 10, "text": "[unavailable: 3 s of audio from Harry]",
+        "speaker_id": "mic", "speaker_name": "Alice", "started_at": T0 + 10, "text": "[unavailable: 3 s of audio from Alice]",
     })
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
     with c:
@@ -448,18 +448,18 @@ def test_the_whole_recording_can_be_transcribed_again(harness):
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
-    marker(c, sid, "mic", "Harry", T0 + 30, 4)
+    live_line(c, sid, "mic", "Alice", T0 + 5, tone(3), "mic:5")
+    marker(c, sid, "mic", "Alice", T0 + 30, 4)
     track = np.concatenate([silence(5), tone(3), silence(22), tone(4), silence(5)])
     put(c, sid, "mic", 0, track, T0)
-    c.post(f"/api/sessions/{sid}/speakers/mic", json={"name": "Harry Twigg"})  # a name given in the GUI
+    c.post(f"/api/sessions/{sid}/speakers/mic", json={"name": "Alice Example"})  # a name given in the GUI
     c.post(f"/api/sessions/{sid}/end")
     with c:
         job = wait(c, c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"}).json()["id"])
     assert job["status"] == "done" and job["result"]["remaining"] == 0, job
     lines = lines_of(c, sid)
     assert [round(u["started_at"] - T0) for u in lines] == [5, 30]
-    assert {u["speaker_name"] for u in lines} == {"Harry Twigg"}
+    assert {u["speaker_name"] for u in lines} == {"Alice Example"}
     assert all(u["client_key"].startswith("re") for u in lines)  # all new; the old ones are gone
 
 
@@ -467,7 +467,7 @@ def test_a_failed_reprocess_all_leaves_the_transcript_as_it_was(harness):
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
+    live_line(c, sid, "mic", "Alice", T0 + 5, tone(3), "mic:5")
     put(c, sid, "mic", 0, np.concatenate([silence(5), tone(3), silence(30), tone(3), silence(2)]), T0)  # two utterances
     c.post(f"/api/sessions/{sid}/end")
     before = lines_of(c, sid)
@@ -504,7 +504,7 @@ def test_an_ended_call_with_gaps_is_filled_when_the_server_is_idle(harness, tmp_
     c = harness.client
     app = harness.app
     sid = new_call(c)
-    marker(c, sid, "mic", "Harry", T0 + 10, 3)
+    marker(c, sid, "mic", "Alice", T0 + 10, 3)
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
 
     with c:
@@ -559,8 +559,8 @@ def test_transcribing_all_again_refuses_to_lose_lines_the_recording_does_not_cov
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
-    live_line(c, sid, "mic", "Harry", T0 + 100, tone(3), "mic:100")  # the recording stops at 30 s
+    live_line(c, sid, "mic", "Alice", T0 + 5, tone(3), "mic:5")
+    live_line(c, sid, "mic", "Alice", T0 + 100, tone(3), "mic:100")  # the recording stops at 30 s
     put(c, sid, "mic", 0, np.concatenate([silence(5), tone(3), silence(22)]), T0)
     before = lines_of(c, sid)
     assert c.post(f"/api/sessions/{sid}/reprocess", json={"mode": "all"}).status_code == 409  # the call is open
@@ -578,8 +578,8 @@ def test_transcribing_all_again_keeps_a_marker_the_recording_cannot_answer(harne
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    live_line(c, sid, "mic", "Harry", T0 + 5, tone(3), "mic:5")
-    marker(c, sid, "mic", "Harry", T0 + 100, 4)  # nothing recorded there
+    live_line(c, sid, "mic", "Alice", T0 + 5, tone(3), "mic:5")
+    marker(c, sid, "mic", "Alice", T0 + 100, 4)  # nothing recorded there
     put(c, sid, "mic", 0, np.concatenate([silence(5), tone(3), silence(22)]), T0)
     c.post(f"/api/sessions/{sid}/end")
     with c:
@@ -593,7 +593,7 @@ def test_a_gap_whose_fill_failed_is_not_found_again_as_unheard_speech(harness):
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    marker(c, sid, "mic", "Harry", T0 + 10, 4)
+    marker(c, sid, "mic", "Alice", T0 + 10, 4)
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(4), silence(6)]), T0)
     engine = harness.loader.engines["alpha"]
     original, calls = engine.transcribe, {"n": 0}
@@ -618,7 +618,7 @@ def test_a_segment_that_cannot_be_decoded_leaves_the_marker_and_the_pass_incompl
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    marker(c, sid, "mic", "Harry", T0 + 10, 4)
+    marker(c, sid, "mic", "Alice", T0 + 10, 4)
     assert put(c, sid, "mic", 0, b"this is not audio at all", T0, encode=None, duration_ms=30000).status_code == 201
     with c:
         job = wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
@@ -649,14 +649,14 @@ def test_a_fill_shares_the_key_of_the_utterance_it_stands_for(harness):
     sid = new_call(c)
     key = f"mic:{T0 + 10}"
     c.post(f"/api/sessions/{sid}/markers", json={
-        "speaker_id": "mic", "speaker_name": "Harry", "started_at": T0 + 10, "duration_ms": 3000, "client_key": key,
-        "text": "[unavailable: 3 s of audio from Harry]",
+        "speaker_id": "mic", "speaker_name": "Alice", "started_at": T0 + 10, "duration_ms": 3000, "client_key": key,
+        "text": "[unavailable: 3 s of audio from Alice]",
     })
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
     with c:
         wait(c, c.post(f"/api/sessions/{sid}/reprocess").json()["id"])
     assert [u["client_key"] for u in lines_of(c, sid)] == [key]
-    assert live_line_raw(c, sid, "mic", "Harry", T0 + 10, tone(3), key).json()["id"] == lines_of(c, sid)[0]["id"]
+    assert live_line_raw(c, sid, "mic", "Alice", T0 + 10, tone(3), key).json()["id"] == lines_of(c, sid)[0]["id"]
     assert len(lines_of(c, sid)) == 1  # the late live request found the line there
 
 
@@ -706,8 +706,8 @@ def test_a_gap_an_earlier_attempt_already_filled_is_not_transcribed_again(harnes
     harness.ready("alpha")
     c = harness.client
     sid = new_call(c)
-    made = marker(c, sid, "mic", "Harry", T0 + 10, 3)  # an older marker: no key of its own
-    harness.services.store.add_utterance(sid, "mic", "Harry", T0 + 10, 3000, "alpha: 3.0s", "alpha", 5, f"fill:{made['id']}")
+    made = marker(c, sid, "mic", "Alice", T0 + 10, 3)  # an older marker: no key of its own
+    harness.services.store.add_utterance(sid, "mic", "Alice", T0 + 10, 3000, "alpha: 3.0s", "alpha", 5, f"fill:{made['id']}")
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
     engine = harness.loader.engines["alpha"]
     before = engine.calls
