@@ -81,10 +81,10 @@ test has transcribed the reference clip with it.
 ## 3. Architecture
 
 ```
- Discord voice (DAVE, UDP)                       the operator's browser (tailnet)
+ Discord voice (DAVE, UDP)                       your browser (tailnet)
           |                                               |
           v                                               v
- +------------------ scribe-host ---------------------------------------+
+ +---------------- scribe-host ----------------------------------------+
  |  bot (Node 22, discord.js)  --HTTP-->  server (Python 3.12, FastAPI)|
  |   per-user Opus -> PCM                 /v1/audio/transcriptions     |
  |   utterance segmentation               /api/models (catalogue)      |
