@@ -96,7 +96,7 @@ test has transcribed the reference clip with it.
  +---------------------------------------------------------------------+
           ^ (phase 2, optional)
           | tailnet
- tools-production-1 (Caddy edge, joins the tailnet) <-- https://scribe.<domain>  (Chrome extension off-tailnet)
+ edge host (reverse proxy, joins the tailnet) <-- https://scribe.<domain>  (Chrome extension off-tailnet)
 ```
 
 ### 3.1 Ingress: the Discord path needs none
@@ -106,17 +106,17 @@ A Discord bot makes only outbound connections (the gateway websocket and the voi
 (`http://scribe-host:8787`, or HTTPS via `tailscale serve`), behind the server's own auth (3.7).
 
 Public ingress matters only for clients that are not on the tailnet, mainly the Chrome extension
-on a machine where Tailscale cannot be installed. For those, phase 2 uses the existing **tools**
-app in `universal-react-monorepo` (`tools-production-1`, its Caddy edge and `host.addSite`), which
+on a machine where Tailscale cannot be installed. For those, phase 2 uses an existing public
+edge host (a reverse proxy you already run), which
 already has a public address, so no Cloudflare tunnel is needed:
 
-- The tools host joins the tailnet with a **tagged, pre-authorised auth key** (`tag:tools-edge`),
+- The edge host joins the tailnet with a **tagged, pre-authorised auth key** (`tag:edge`),
   node-key expiry disabled for that tagged node so the edge does not silently drop off, and the
   auth key itself short-lived (single use).
-- The tailnet policy lets `tag:tools-edge` reach only `scribe-host:8787`. If the tailnet still runs
+- The tailnet policy lets `tag:edge` reach only `scribe-host:8787`. If the tailnet still runs
   the default allow-all policy, that restriction means writing explicit grants for every other
   device: a **tailnet-wide policy change**, not a one-line addition.
-- A new tools workload adds the edge site `scribe.<domain>`, reverse-proxied to
+- A new workload adds the edge site `scribe.<domain>`, reverse-proxied to
   `scribe-host.<tailnet>.ts.net:8787`. The server has no auth of its own (3.7), so the edge would have to supply it (an access policy in front of the site); that is part of the decision.
 
 This is a public-exposure decision and needs the owner (H3).
@@ -380,7 +380,7 @@ and the user's mic in their own browser and posts utterances to the server like 
 
 **Why HTTP utterances and not the WebSocket stream planned earlier:** the bot's ingestion path,
 idempotency and retries are reused unchanged, the server gains no streaming code, and it works
-through the phase-2 Caddy edge as it is.
+through the phase-2 edge as it is.
 
 **Auth.** None to send (3.7). Browsers send
 `Origin: chrome-extension://<id>` on the extension's POSTs, which the CSRF check (3.7) would refuse,
@@ -389,8 +389,8 @@ fixed by the public `key` in the manifest: the unpacked extension has ID
 `mcnpmckibkddnnenfondlblnddldonfm` on every machine. A web page cannot send that origin; any other
 extension's origin is refused.
 
-**Reach.** The host permissions cover `scribe-host`, `*.ts.net`, `localhost` and `127.0.0.1`. Any
-other server URL (the phase-2 public domain) is requested as an optional permission when it is
+**Reach.** The host permissions cover `*.ts.net`, `localhost` and `127.0.0.1`. Any
+other server URL (a short hostname such as http://scribe-host:8787, or the phase-2 public domain) is requested as an optional permission when it is
 saved in the settings.
 
 **What Google and the call can see.** Nothing announces it. Tab capture happens inside Chrome,
@@ -531,7 +531,7 @@ all-rounder, distil-large-v3.5 for speed with Whisper behaviour, Whisper small a
 | --- | --- | --- |
 | 0 (MVP) | Server, catalogue, model swap, auth, GUI; bot with replay-tested pipeline; all local on scribe-host. Proves audio in, transcript out, model choice through the GUI. Does not prove Discord receive. | Done |
 | 1 | **Live DAVE test first** (6): the join/handshake half passed (DAVE v1 negotiated, connection Ready); the receive half needs a person speaking. Systemd units deployed on scribe-host. Then a soak test; a dedicated Discord application (H1); and the auto-shutdown gate as a separate company-infra change | Receive test: someone talking in a call; the application (H1) |
-| 2 | Public ingress via the tools host + tailnet policy | H3 |
+| 2 | Public ingress via the edge host + tailnet policy | H3 |
 | 3 | Chrome extension for Meet / any browser call (4): built and tested in Chromium; the first real Meet call is the live test | Load it unpacked and try a call; H3 if off the tailnet |
 | 4 | Diarization for single-stream sources (built: 3.8; a live Meet call is its real test), LLM summaries, always-on bot host, extra engines (NeMo/BF16 models) | Per item |
 | 5 | Podcast links and recordings: the `scribe` CLI, background transcription jobs (`/api/transcriptions`) saved to History, and the Transcribe tab (`docs/cli.md`) | Done |
@@ -575,7 +575,7 @@ option needs the owner's own hands. Any can be revisited.
 - **H2 Where: the Discord server**, slash commands registered there only (`SCRIBE_GUILD_ID`). The
   notice, nickname and `/scribe optout` are the consent mechanism; transcripts are not echoed into
   Discord (`SCRIBE_ECHO` off).
-- **H3 Ingress: tailnet-only.** Public exposure is not needed for the Discord path (3.1). The tools
+- **H3 Ingress: tailnet-only.** Public exposure is not needed for the Discord path (3.1). The edge
   host route stays the plan for phase 3, when the Chrome extension needs off-tailnet access.
 - **H4 Retention: no audio kept; transcripts kept until deleted** in the GUI.
 - **H5 Availability: on demand.** scribe-host must be on for a call; both services start at boot. An
