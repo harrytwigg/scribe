@@ -14,7 +14,7 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 
 ## Using it
 
-1. Open the GUI (`http://harry-box:8787` on the tailnet). There is no sign-in: whoever can reach the server can use it.
+1. Open the GUI (`http://scribe-host:8787` on the tailnet). There is no sign-in: whoever can reach the server can use it.
 2. **Models**: download a model and press **Use**. Parakeet TDT 0.6B v2 is the default.
 3. In a Discord voice channel, run `/scribe join`. Lines appear under **Live** as people speak.
    `/scribe stop` ends it (anyone in the call can); `/scribe optout` excludes you for good.
@@ -54,7 +54,7 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
    folder is deleted or moved. On the machine that runs scribe, `deploy/install.sh` keeps a copy at
    `~/.local/opt/scribe/extension`; from any other machine, the dashboard's **Extension** tab
    downloads it as a zip to unzip somewhere permanent. Repeat for each Chrome profile.
-2. In the extension's **Settings**: the server (`http://harry-box:8787`) and your
+2. In the extension's **Settings**: the server (`http://scribe-host:8787`) and your
    name. Press **Allow microphone** once.
 3. In the Meet tab, click the scribe icon, then **Transcribe this tab**. Lines from the call
    (as Speaker 1, Speaker 2, ...: click a name to rename them) and your mic (your name) appear

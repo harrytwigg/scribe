@@ -12,7 +12,7 @@ scribe transcribe LINK1 LINK2 talk.m4a --out transcripts/ --format md       # a 
 scribe transcribe --from links.txt --format json > all.json                # sources from a file, one per line
 ```
 
-On harry-box it is installed by `deploy/install.sh` at `~/.local/bin/scribe`. From a checkout:
+On scribe-host it is installed by `deploy/install.sh` at `~/.local/bin/scribe`. From a checkout:
 `cd server && uv run scribe ...`. It needs the scribe server running (`systemctl --user status
 scribe-server`) with a model active (the default, Parakeet, is activated at start).
 
@@ -124,7 +124,7 @@ the message is on stderr either way).
 
 - **Server:** `--server`, else `$SCRIBE_URL`, else `SCRIBE_SERVER_URL` in `~/.config/scribe/env`,
   else `http://127.0.0.1:8787`.
-- There is no API token: on harry-box `scribe` works with no setup, and elsewhere only the server URL is needed.
+- There is no API token: on scribe-host `scribe` works with no setup, and elsewhere only the server URL is needed.
 - `$SCRIBE_ENV_FILE` overrides the env file's path.
 
 ## Limits and behaviour worth knowing

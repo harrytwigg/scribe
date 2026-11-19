@@ -110,14 +110,14 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
         # The manifest's public key pins the ID, and so the origin the server admits.
         assert worker.url.startswith(f"chrome-extension://{EXTENSION_ID}/")
         config = {
-            "server": server, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": True, "record": True,
+            "server": server, "myName": "Alice", "othersName": "Meet", "useMic": True, "separateSpeakers": True, "record": True,
         }
 
         # Settings: saved through the options page, which tests the connection.
         options = context.new_page()
         options.goto(f"chrome-extension://{EXTENSION_ID}/src/options.html")
         options.fill("[name=server]", server + "/")
-        options.fill("[name=myName]", "Harry")
+        options.fill("[name=myName]", "Alice")
         options.fill("[name=othersName]", "Meet")
         options.click("text=Save and test")
         options.get_by_text("Connected: active model parakeet-tdt-0.6b-v2").wait_for()
@@ -224,7 +224,7 @@ def test_extension_transcribes_tab_and_mic(server, tmp_path):
     # The tab mixes everyone on the far side, so it is split into speakers; the mic is just you.
     assert {line["speaker_id"] for line in by_speaker["tab"]} == {"tab#1"}
     assert {line["speaker_name"] for line in by_speaker["tab"]} == {"Speaker 1"}
-    assert {line["speaker_name"] for line in by_speaker["mic"]} == {"Harry"}
+    assert {line["speaker_name"] for line in by_speaker["mic"]} == {"Alice"}
     for speaker in ("tab", "mic"):
         text = " ".join(line["text"] for line in by_speaker[speaker]).lower()
         # Words only: punctuation varies with where an utterance was cut ("ask not. what ...").

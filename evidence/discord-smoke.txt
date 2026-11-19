@@ -1,7 +1,7 @@
-2026-10-12T22:18:05.726Z logged in as Harry test#3802
-2026-10-12T22:18:05.930Z joining empty voice channel #General in Longbow
+2026-10-12T22:18:05.726Z logged in as Scribe test#3802
+2026-10-12T22:18:05.930Z joining empty voice channel #General in Example Server
 2026-10-12T22:18:06.435Z [state] signalling -> connecting
-2026-10-12T22:18:06.517Z [voice] [NW] [WS] >> {"op":0,"d":{"server_id":"1551668459429953637","user_id":"1531290649314463824","session_id":"[redacted]","token":"[redacted]","max_dave_protocol_version":1}}
+2026-10-12T22:18:06.517Z [voice] [NW] [WS] >> {"op":0,"d":{"server_id":"<guild-id>","user_id":"<user-id>","session_id":"[redacted]","token":"[redacted]","max_dave_protocol_version":1}}
 2026-10-12T22:18:06.518Z [state] connecting -> connecting
 2026-10-12T22:18:06.534Z [state] connecting -> connecting
 2026-10-12T22:18:06.551Z [voice] [NW] [WS] >> {"op":1,"d":{"protocol":"udp","data":{"address":"[redacted]","port":54933,"mode":"aead_aes256_gcm_rtpsize"}}}
@@ -10,8 +10,8 @@
 2026-10-12T22:18:06.568Z [voice] [NW] [DAVE] Session initialized for protocol version 1
 2026-10-12T22:18:06.572Z [state] connecting -> ready
 2026-10-12T22:18:06.572Z [voice] [NW] state change:
-from {"code":3,"ws":true,"connectionOptions":{"endpoint":"c-lhr09-ec9673a1.discord.media:2096","serverId":"1551668459429953637","token":"[redacted]","sessionId":"[redacted]","userId":"1531290649314463824","channelId":"1551668461485166605"},"udp":true,"connectionData":{"ssrc":5494,"connectedClients":{}}}
-to {"code":4,"ws":true,"connectionOptions":{"endpoint":"c-lhr09-ec9673a1.discord.media:2096","serverId":"1551668459429953637","token":"[redacted]","sessionId":"[redacted]","userId":"1531290649314463824","channelId":"1551668461485166605"},"udp":true,"connectionData":{"ssrc":5494,"connectedClients":{},"encryptionMode":"aead_aes256_gcm_rtpsize","secretKey":"[redacted]","sequence":10191,"timestamp":2372647660,"nonce":0,"nonceBuffer":{"type":"Buffer","data":[0,0,0,0,0,0,0,0,0,0,0,0]},"speaking":false,"packetsPlayed":0},"dave":{"_events":{},"_eventsCount":4,"channelId":"1551668461485166605","userId":"1531290649314463824","protocolVersion":1,"pendingTransitions":{},"downgraded":false,"consecutiveFailures":0,"failureTolerance":36,"reinitializing":false,"session":{}}}
+from {"code":3,"ws":true,"connectionOptions":{"endpoint":"c-lhr09-ec9673a1.discord.media:2096","serverId":"<guild-id>","token":"[redacted]","sessionId":"[redacted]","userId":"<user-id>","channelId":"<channel-id>"},"udp":true,"connectionData":{"ssrc":5494,"connectedClients":{}}}
+to {"code":4,"ws":true,"connectionOptions":{"endpoint":"c-lhr09-ec9673a1.discord.media:2096","serverId":"<guild-id>","token":"[redacted]","sessionId":"[redacted]","userId":"<user-id>","channelId":"<channel-id>"},"udp":true,"connectionData":{"ssrc":5494,"connectedClients":{},"encryptionMode":"aead_aes256_gcm_rtpsize","secretKey":"[redacted]","sequence":10191,"timestamp":2372647660,"nonce":0,"nonceBuffer":{"type":"Buffer","data":[0,0,0,0,0,0,0,0,0,0,0,0]},"speaking":false,"packetsPlayed":0},"dave":{"_events":{},"_eventsCount":4,"channelId":"<channel-id>","userId":"<user-id>","protocolVersion":1,"pendingTransitions":{},"downgraded":false,"consecutiveFailures":0,"failureTolerance":36,"reinitializing":false,"session":{}}}
 2026-10-12T22:18:06.572Z voice connection READY
 2026-10-12T22:18:06.575Z [voice] [NW] [DAVE] Set MLS external sender
 2026-10-12T22:18:14.575Z [state] ready -> destroyed

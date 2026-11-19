@@ -63,7 +63,7 @@ function recordingCall({ upload = [], utterance = [503], ...options } = {}) {
   FakeRecorder.instances = []
   const puts = scriptedFetch(upload, [201, { created: true }])
   const live = scriptedFetch(utterance, [503, { detail: 'transcription queue is full' }])
-  const c = new Call({ server: 'http://box:8787', myName: 'Harry', othersName: 'Others' }, () => {}, {
+  const c = new Call({ server: 'http://box:8787', myName: 'Alice', othersName: 'Others' }, () => {}, {
     idleStopMs: 600_000, liveGraceMs: 20, uploadGraceMs: 30, recorderOptions: { Recorder: FakeRecorder },
     uploader: new ChunkUploader({ clientFor: () => new ScribeClient('http://box:8787', { fetch: puts.fetch }), store: memoryChunkStore(), sleep: () => new Promise((resolve) => setTimeout(resolve, 5)), backoffMs: [10] }),
     ...options,
@@ -106,7 +106,7 @@ test('a recording the server cannot take yet stays in local storage and does not
 
 test('utterances still being retried when the call ends become markers rather than holding it up', async () => {
   const { c, live } = recordingCall() // 503 for every attempt, with a minute between them
-  c.post({ id: 'mic', name: 'Harry' }, new Float32Array(16_000 * 4), 1_800_000_010)
+  c.post({ id: 'mic', name: 'Alice' }, new Float32Array(16_000 * 4), 1_800_000_010)
   await new Promise((resolve) => setTimeout(resolve, 10)) // the first attempt has failed; it waits a minute
   c.client.endSession = async () => ({})
   const started = Date.now()

@@ -288,7 +288,7 @@ def test_reprocess_fills_the_gaps_of_a_recorded_call(served, capsys):
 
     c = served.client
     sid = new_call(c)
-    marker(c, sid, "mic", "Harry", T0 + 10, 3)
+    marker(c, sid, "mic", "Alice", T0 + 10, 3)
     put(c, sid, "mic", 0, np.concatenate([silence(10), tone(3), silence(7)]), T0)
 
     code, out, _ = run(capsys, "recording", sid)

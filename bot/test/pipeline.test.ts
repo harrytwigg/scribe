@@ -84,9 +84,9 @@ describe('Pipeline with undecodable packets', () => {
     // again for the rest of the call, while everyone else was.
     const source = new ReplaySource(
       [
-        { userId: 'harry', pcm: tone(2000, 300), atMs: 0, corruptFirst: 1 },
+        { userId: 'alice', pcm: tone(2000, 300), atMs: 0, corruptFirst: 1 },
         { userId: 'badger', pcm: tone(2000, 500), atMs: 200 },
-        { userId: 'harry', pcm: tone(1500, 300), atMs: 4000 },
+        { userId: 'alice', pcm: tone(1500, 300), atMs: 4000 },
       ],
       20,
     )
@@ -103,10 +103,10 @@ describe('Pipeline with undecodable packets', () => {
     await source.play()
     await pipeline.stop()
     const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
-    expect(byUser('harry')).toEqual([2000, 1500])
+    expect(byUser('alice')).toEqual([2000, 1500])
     expect(byUser('badger')).toEqual([2000])
-    expect(pipeline.heard.get('harry')).toMatchObject({ corrupt: 1, encrypted: 0, lines: 2 })
-    expect(errors).toEqual(['skipped 1 undecodable packet(s) from harry'])
+    expect(pipeline.heard.get('alice')).toMatchObject({ corrupt: 1, encrypted: 0, lines: 2 })
+    expect(errors).toEqual(['skipped 1 undecodable packet(s) from alice'])
   })
 
   it('loses only the bad packets, not the speech after them', async () => {
@@ -132,9 +132,9 @@ describe('Pipeline with frames it cannot decrypt', () => {
     // corrupts the heap every decoder shares, silencing everyone else too.
     const source = new ReplaySource(
       [
-        { userId: 'harry', pcm: tone(1000, 300), atMs: 0, encryptedFirst: 500 },
+        { userId: 'alice', pcm: tone(1000, 300), atMs: 0, encryptedFirst: 500 },
         { userId: 'badger', pcm: tone(2000, 500), atMs: 11_000 },
-        { userId: 'harry', pcm: tone(1500, 300), atMs: 14_000 },
+        { userId: 'alice', pcm: tone(1500, 300), atMs: 14_000 },
       ],
       20,
     )
@@ -150,9 +150,9 @@ describe('Pipeline with frames it cannot decrypt', () => {
     await pipeline.stop()
     const byUser = (id: string) => client.posts.filter((p) => p.speaker.id === id).map((p) => Math.round(p.ms / 100) * 100)
     // Only the real speech: none of the encrypted frames became audio.
-    expect(byUser('harry')).toEqual([1000, 1500])
+    expect(byUser('alice')).toEqual([1000, 1500])
     expect(byUser('badger')).toEqual([2000])
-    expect(pipeline.heard.get('harry')).toMatchObject({ encrypted: 500, corrupt: 0 })
+    expect(pipeline.heard.get('alice')).toMatchObject({ encrypted: 500, corrupt: 0 })
   })
 })
 

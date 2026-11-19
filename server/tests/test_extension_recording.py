@@ -133,7 +133,7 @@ def offscreen(context):
 
 def begin(page, served, retry_ms=(200, 400)):
     """Start a call (the tab is a looping tone-burst clip, the mic Chromium's fake one); returns when."""
-    config = {"server": served.url, "myName": "Harry", "othersName": "Meet", "useMic": True, "separateSpeakers": False, "record": True}
+    config = {"server": served.url, "myName": "Alice", "othersName": "Meet", "useMic": True, "separateSpeakers": False, "record": True}
     began = time.time()
     page.evaluate(
         """async ([config, clip, retry, segmentMs]) => {
@@ -258,7 +258,7 @@ def test_a_starved_server_loses_no_audio_and_the_transcript_is_filled_afterwards
     # In order, and each from the right side of the call.
     assert [u["started_at"] for u in after] == sorted(u["started_at"] for u in after)
     assert {u["speaker_id"] for u in after} == {"tab", "mic"}
-    assert {u["speaker_name"] for u in after if u["speaker_id"] == "mic"} == {"Harry"}
+    assert {u["speaker_name"] for u in after if u["speaker_id"] == "mic"} == {"Alice"}
 
 
 def test_a_server_stopped_mid_call_loses_no_audio_and_the_transcript_is_filled_afterwards(tmp_path, served):

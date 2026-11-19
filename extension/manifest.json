@@ -7,7 +7,6 @@
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtRocO7J07pAyZry2uRIYhEsAmJUqPmM7iNzF6SpERkPcQEO8dXhvnZBwlbKxp0Uwul2tinmxMiRju25EPVorwggDDxvQxwP9EfjV5KgOH53belLtEHxtkPvCPu+zGTIM0r2pxOWyZo27paylzWwxHQOEHgBwcKwdinzYhE5GkpeH80LgD/9/Ag2MHS7/dwPW/gtybuCb84Y20Lb7AaTfbD9JKaAjFW2UetRSjnHYQpJaZXfVgx/mXNvsbjS9rVD9G0/WlnJJ9cp2WT1f6tQAatuoi9Fuj8UxyjTYf2JeIiGctt+jkVSchyFvRmyN2SnE1hrWIvDQW+eAu2limaifCQIDAQAB",
   "permissions": ["tabCapture", "offscreen", "storage", "activeTab", "webNavigation"],
   "host_permissions": [
-    "http://harry-box/*",
     "http://*.ts.net/*",
     "https://*.ts.net/*",
     "http://localhost/*",
