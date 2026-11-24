@@ -8,7 +8,7 @@ models (NVIDIA Parakeet and Canary, OpenAI Whisper and Distil-Whisper) chosen in
 - `server/`: Python ASR server and GUI (FastAPI; faster-whisper and onnx-asr on CUDA).
 - `bot/`: Discord bot (discord.js, `@discordjs/voice` with DAVE).
 - `extension/`: Chrome extension for Meet and other browser calls (tab audio + mic, no bot).
-- `server/scribe_server/cli.py`, `podcast.py`: the `scribe` command and the podcast link resolver (`docs/cli.md`).
+- `server/scribe_server/cli.py`, `podcast.py`: the `scribe` command and the podcast link resolver (`docs/cli.md`); `youtube.py`: YouTube links to audio, through yt-dlp.
 - `deploy/`: systemd user units and the install script.
 - `docs/spec.md`: design, decisions, phases. `docs/research/`: the research behind it.
 
