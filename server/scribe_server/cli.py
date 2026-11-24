@@ -126,7 +126,7 @@ class Server:
 
 
 def looks_like_link(source: str) -> bool:
-    return source.startswith((
+    return source.lower().startswith((
         "http://", "https://", "spotify:", "open.spotify.com/", "podcasts.apple.com/", "spotify.link/",
         "youtube.com/", "www.youtube.com/", "m.youtube.com/", "music.youtube.com/", "youtu.be/",
     ))
@@ -171,6 +171,8 @@ def fetch_audio(episode: podcast.Episode, directory: Path, quiet: bool, tag: str
             path = youtube.download(episode, directory, name)
         else:
             path = podcast.download(podcast.Fetcher(timeout=60), episode.audio_url, directory, name, progress)
+    except podcast.NotFound as error:
+        raise CliError(str(error), NOT_FOUND, "not_found") from error
     except podcast.PodcastError as error:
         raise CliError(str(error), NETWORK, "network") from error
     say(f"downloaded {path.name} ({path.stat().st_size / 1e6:.1f} MB)", quiet, tag)

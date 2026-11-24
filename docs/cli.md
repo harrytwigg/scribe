@@ -37,7 +37,7 @@ scribe-server`) with a model active (the default, Parakeet, is activated at star
 | `https://podcasts.apple.com/<cc>/podcast/<slug>/id<id>` | The show's newest episode, or `--episode N`; with `?i=<id>`, that episode (among the ~300 newest Apple lists) |
 | An RSS feed URL, or a web page that links one | The feed's newest episode, or `--episode N` |
 | A direct audio URL (`.mp3`, `.m4a`, ...) | That file |
-| `https://www.youtube.com/watch?v=<id>` (also `youtu.be/<id>`, `/shorts/<id>`, `/live/<id>`, `/embed/<id>`, `m.` and `music.` hosts) | That video's audio-only stream, fetched with yt-dlp (see "YouTube" below) |
+| `https://www.youtube.com/watch?v=<id>` (also `youtu.be/<id>`, `/shorts/<id>`, `/live/<id>`, `/embed/<id>`, `m.`, `music.` and youtube-nocookie.com hosts; other YouTube hosts are not recognised) | That video's audio-only stream, fetched with yt-dlp (see "YouTube" below) |
 | A local file | That file (anything libsndfile or FFmpeg reads: wav, flac, ogg, opus, mp3, m4a, aac, mp4) |
 
 ### How a Spotify link is turned into audio
@@ -59,23 +59,27 @@ Spotify pages likewise fail.
 ### YouTube
 
 A link to one public YouTube video is downloaded as **audio only** with [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-(run as `python -m yt_dlp` from scribe's own virtualenv, on the machine running `scribe`, not on the
-server) and then uploaded like any other audio. The title, channel and upload date are in the JSON's
+(run as `python -I -m yt_dlp` from scribe's own virtualenv, on the machine running `scribe`, not on the
+server; it ignores yt-dlp config files and plugin directories and runs from an empty directory, because yt-dlp's
+config can name programs to run and `scribe` is started from directories that are not its own) and then uploaded like any other audio. The title, channel and upload date are in the JSON's
 `episode` (`source` is `youtube`; `show` and `publisher` are the channel); `scribe resolve LINK` shows
 them without downloading, and `scribe download LINK --out DIR` keeps the audio. A 19-minute video
 takes about 6 s to download and 16 s to transcribe.
 
 - **One video only.** A `list=` next to a `v=` is ignored. A playlist, channel (`/@name`) or search link
   is refused with exit 3. `--episode N` is ignored, and `resolve --list` lists just the one video.
-- **Only public videos.** Private, removed, members-only, age-restricted, region-locked and not-yet-ended
-  live videos fail with exit 3 and YouTube's own reason. scribe has no YouTube login or cookies, so a video
-  YouTube makes this machine "sign in to confirm you're not a bot" for fails the same way; a network failure
-  (exit 4) may be transient.
+- **Only public videos.** A private, removed, members-only, age-restricted, region-locked or not-yet-ended
+  live video fails with exit 3 and YouTube's own reason; only messages that say so are exit 3. scribe has no
+  YouTube login or cookies, so a video YouTube makes this machine "sign in to confirm you're not a bot" for
+  fails the same way. Anything else yt-dlp reports (network trouble, a changed YouTube, an error scribe has
+  not seen) is exit 4.
 - **YouTube's terms** restrict downloading content, and YouTube can stop serving a machine that does it a lot.
   Use it for what you would otherwise watch or quote: not bulk, and not other people's private or call audio.
   There is no consent step here either.
-- **Keep yt-dlp current.** YouTube changes often and an old yt-dlp stops working (the error says so). Update
-  it with `cd server && uv lock --upgrade-package yt-dlp`, then `deploy/install.sh`.
+- **Keep yt-dlp current.** YouTube changes often and an old yt-dlp stops working. scribe cannot always tell
+  that from other trouble, so exit 4 from a YouTube link that works in a browser means "update yt-dlp" first:
+  the error text says so ("unable to extract", "requested format is not available", HTTP 403 on the video data
+  and the like). Update it with `cd server && uv lock --upgrade-package yt-dlp`, then `deploy/install.sh`.
   yt-dlp warns that it wants a JavaScript runtime (deno) to solve YouTube's download-speed challenge; it
   works without one for ordinary videos, and scribe does not enable yt-dlp's downloading of solver
   scripts from GitHub.
@@ -142,8 +146,8 @@ the message is on stderr either way).
 | --- | --- |
 | 0 | Transcript produced |
 | 2 | Bad usage (SOURCE is neither an existing file nor a link) |
-| 3 | No audio for that link: not a public podcast, Spotify exclusive, no matching episode, unsupported link kind; a private, removed, age-restricted or live YouTube video, a YouTube playlist or channel link. Retrying will not help. |
-| 4 | Network or download failure (the link, the feed or the audio host). May be transient. |
+| 3 | No audio for that link: not a public podcast, Spotify exclusive, no matching episode, unsupported link kind; a YouTube video that is private, removed, age-restricted, members-only or still live, or that YouTube makes this machine sign in for, or a YouTube playlist or channel link. Retrying will not help. |
+| 4 | Network or download failure (the link, the feed or the audio host). May be transient. For YouTube it is also what an out-of-date yt-dlp gives, and any yt-dlp error scribe does not recognise: the message says to update yt-dlp. |
 | 5 | The scribe server is unreachable, has no active model, or refused the upload (too large) |
 | 6 | The server failed to transcribe (undecodable audio, internal error) |
 | 7 | Several sources: some succeeded and some failed (each failure is in the JSON array and on stderr). If every source failed, the first failure's code is used |
