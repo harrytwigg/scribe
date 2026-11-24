@@ -1,8 +1,8 @@
-"""`scribe`: transcribe a podcast episode (a Spotify, Apple Podcasts, RSS or audio link) or a local
-audio file with the scribe server, from a script or an agent (docs/cli.md).
+"""`scribe`: transcribe a podcast episode (a Spotify, Apple Podcasts, RSS or audio link), a YouTube
+video or a local audio file with the scribe server, from a script or an agent (docs/cli.md).
 
-Plain standard-library code: it fetches and downloads here and sends the audio to the server,
-which runs the model. Progress goes to stderr and the transcript to stdout.
+Standard-library code, plus yt-dlp for YouTube: it fetches and downloads here and sends the audio to
+the server, which runs the model. Progress goes to stderr and the transcript to stdout.
 """
 
 import argparse
@@ -18,14 +18,14 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import podcast
+from . import podcast, youtube
 
 OK, USAGE, NOT_FOUND, NETWORK, SERVER, FAILED, INTERRUPTED = 0, 2, 3, 4, 5, 6, 130
 DEFAULT_SERVER = "http://127.0.0.1:8787"
 ENV_FILE = "~/.config/scribe/env"
 
 DESCRIPTION = """\
-Transcribe a podcast episode or an audio file with the scribe server.
+Transcribe a podcast episode, a YouTube video or an audio file with the scribe server.
 
 SOURCE is any of:
   https://open.spotify.com/episode/...   a Spotify episode (its public RSS copy is fetched: Spotify's own
@@ -34,6 +34,8 @@ SOURCE is any of:
   https://podcasts.apple.com/...         an Apple Podcasts show or episode (?i=...)
   https://host/feed.xml                  an RSS feed: its newest episode (--episode N)
   https://host/episode.mp3               a direct audio URL
+  https://www.youtube.com/watch?v=...    a public YouTube video (also youtu.be, /shorts/, /live/): only its audio is
+                                         downloaded, with yt-dlp
   ./talk.m4a                             a local audio file (wav, flac, ogg, mp3, m4a, ...)
 """
 
@@ -42,7 +44,7 @@ Output: the transcript on stdout (or, with --out, written to that file, and its 
 progress and errors on stderr. --format json gives text, timed segments, the episode and the model.
 
 Exit codes: 0 ok; 2 bad usage; 3 no audio for that link (not a public podcast, Spotify exclusive, no matching
-episode); 4 network or download failure; 5 scribe server unreachable or no model active;
+episode; a private, removed, age-restricted or live YouTube video, or one YouTube makes this machine sign in for); 4 network or download failure; 5 scribe server unreachable or no model active;
 6 transcription failed; 130 interrupted.
 
 The server: --server, else $SCRIBE_URL, else SCRIBE_SERVER_URL in ~/.config/scribe/env, else
@@ -51,6 +53,7 @@ http://127.0.0.1:8787. There is no token to give.
 Examples:
   scribe transcribe https://open.spotify.com/episode/4rOoJ6Egrf8K2IrywzwOMk > episode.txt
   scribe transcribe https://feeds.example.com/show.xml --episode 3 --format json --out ep3.json
+  scribe transcribe https://www.youtube.com/watch?v=jNQXAC9IVRw --format json --out zoo.json
   scribe transcribe talk.m4a --speakers --format srt --out talk.srt
   scribe resolve https://open.spotify.com/episode/...      # what would be fetched, no download
 """
@@ -123,7 +126,10 @@ class Server:
 
 
 def looks_like_link(source: str) -> bool:
-    return source.startswith(("http://", "https://", "spotify:", "open.spotify.com/", "podcasts.apple.com/", "spotify.link/"))
+    return source.startswith((
+        "http://", "https://", "spotify:", "open.spotify.com/", "podcasts.apple.com/", "spotify.link/",
+        "youtube.com/", "www.youtube.com/", "m.youtube.com/", "music.youtube.com/", "youtu.be/",
+    ))
 
 
 def describe(episode: podcast.Episode) -> str:
@@ -133,7 +139,7 @@ def describe(episode: podcast.Episode) -> str:
 
 def resolve_source(source: str, nth: int, quiet: bool, tag: str = "") -> podcast.Episode:
     try:
-        episode = podcast.resolve(podcast.Fetcher(), source, nth)
+        episode = youtube.resolve(source) if youtube.is_youtube(source) else podcast.resolve(podcast.Fetcher(), source, nth)
     except podcast.FetchError as error:
         raise CliError(str(error), NETWORK, "network") from error
     except podcast.PodcastError as error:
@@ -160,7 +166,11 @@ def fetch_audio(episode: podcast.Episode, directory: Path, quiet: bool, tag: str
 
     name = podcast.safe_name(f"{episode.show or ''} {episode.title}")
     try:
-        path = podcast.download(podcast.Fetcher(timeout=60), episode.audio_url, directory, name, progress)
+        if episode.source == "youtube":
+            say("downloading the audio with yt-dlp", quiet, tag)
+            path = youtube.download(episode, directory, name)
+        else:
+            path = podcast.download(podcast.Fetcher(timeout=60), episode.audio_url, directory, name, progress)
     except podcast.PodcastError as error:
         raise CliError(str(error), NETWORK, "network") from error
     say(f"downloaded {path.name} ({path.stat().st_size / 1e6:.1f} MB)", quiet, tag)
@@ -429,7 +439,10 @@ def cmd_resolve(args) -> int:
         raise CliError(f"{args.source!r} is not a link", USAGE, "usage")
     fetcher = podcast.Fetcher()
     try:
-        episodes = podcast.list_episodes(fetcher, args.source, args.limit) if args.list else [podcast.resolve(fetcher, args.source, args.episode)]
+        if youtube.is_youtube(args.source):
+            episodes = [youtube.resolve(args.source)]  # one video: --list has nothing more to list
+        else:
+            episodes = podcast.list_episodes(fetcher, args.source, args.limit) if args.list else [podcast.resolve(fetcher, args.source, args.episode)]
     except podcast.FetchError as error:
         raise CliError(str(error), NETWORK, "network") from error
     except podcast.PodcastError as error:
@@ -497,7 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--episode", type=int, default=1, metavar="N", help="of a show or feed: the Nth newest episode (default 1, the newest)")
 
     t = commands.add_parser("transcribe", help="download (if a link) and transcribe", description=DESCRIPTION, epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
-    t.add_argument("sources", metavar="SOURCE", nargs="*", help="a podcast link or an audio file; several are queued and run in turn")
+    t.add_argument("sources", metavar="SOURCE", nargs="*", help="a podcast or YouTube link or an audio file; several are queued and run in turn")
     t.add_argument("--from", dest="sources_from", metavar="FILE", help="also read SOURCEs from FILE, one per line ('-' is stdin; blank lines and # comments are skipped)")
     t.add_argument("--format", choices=["text", "json", "srt", "md"], default="text", help="text (default), json, srt or md")
     t.add_argument("--out", metavar="FILE", help="write the transcript here and print the path, instead of stdout; with several SOURCEs a directory, one file per source")

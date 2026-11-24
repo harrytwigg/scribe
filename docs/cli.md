@@ -1,11 +1,12 @@
 # The `scribe` command
 
-Transcribe a podcast episode or an audio file with the scribe server, from a script or an agent.
+Transcribe a podcast episode, a YouTube video or an audio file with the scribe server, from a script or an agent.
 Non-interactive: arguments in, transcript on stdout, progress on stderr, a distinct exit code per
 kind of failure.
 
 ```sh
 scribe transcribe https://open.spotify.com/episode/3tdrNundncNjVFHyNy9zXM   # prints the transcript
+scribe transcribe https://www.youtube.com/watch?v=jNQXAC9IVRw --format json # a YouTube video's audio
 scribe transcribe talk.m4a --speakers --format srt --out talk.srt           # writes talk.srt, prints its path
 scribe resolve https://open.spotify.com/episode/...                        # what would be fetched; no download
 scribe transcribe LINK1 LINK2 talk.m4a --out transcripts/ --format md       # a queue: one file per source
@@ -36,6 +37,7 @@ scribe-server`) with a model active (the default, Parakeet, is activated at star
 | `https://podcasts.apple.com/<cc>/podcast/<slug>/id<id>` | The show's newest episode, or `--episode N`; with `?i=<id>`, that episode (among the ~300 newest Apple lists) |
 | An RSS feed URL, or a web page that links one | The feed's newest episode, or `--episode N` |
 | A direct audio URL (`.mp3`, `.m4a`, ...) | That file |
+| `https://www.youtube.com/watch?v=<id>` (also `youtu.be/<id>`, `/shorts/<id>`, `/live/<id>`, `/embed/<id>`, `m.` and `music.` hosts) | That video's audio-only stream, fetched with yt-dlp (see "YouTube" below) |
 | A local file | That file (anything libsndfile or FFmpeg reads: wav, flac, ogg, opus, mp3, m4a, aac, mp4) |
 
 ### How a Spotify link is turned into audio
@@ -53,6 +55,33 @@ A **Spotify exclusive** (or any show not in Apple's directory with a public feed
 copy, so it cannot be fetched from its link: `scribe` exits with code 3 and says so. If you have
 the show's RSS URL, an mp3 URL or the audio file, pass that instead. Private or region-locked
 Spotify pages likewise fail.
+
+### YouTube
+
+A link to one public YouTube video is downloaded as **audio only** with [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+(run as `python -m yt_dlp` from scribe's own virtualenv, on the machine running `scribe`, not on the
+server) and then uploaded like any other audio. The title, channel and upload date are in the JSON's
+`episode` (`source` is `youtube`; `show` and `publisher` are the channel); `scribe resolve LINK` shows
+them without downloading, and `scribe download LINK --out DIR` keeps the audio. A 19-minute video
+takes about 6 s to download and 16 s to transcribe.
+
+- **One video only.** A `list=` next to a `v=` is ignored. A playlist, channel (`/@name`) or search link
+  is refused with exit 3. `--episode N` is ignored, and `resolve --list` lists just the one video.
+- **Only public videos.** Private, removed, members-only, age-restricted, region-locked and not-yet-ended
+  live videos fail with exit 3 and YouTube's own reason. scribe has no YouTube login or cookies, so a video
+  YouTube makes this machine "sign in to confirm you're not a bot" for fails the same way; a network failure
+  (exit 4) may be transient.
+- **YouTube's terms** restrict downloading content, and YouTube can stop serving a machine that does it a lot.
+  Use it for what you would otherwise watch or quote: not bulk, and not other people's private or call audio.
+  There is no consent step here either.
+- **Keep yt-dlp current.** YouTube changes often and an old yt-dlp stops working (the error says so). Update
+  it with `cd server && uv lock --upgrade-package yt-dlp`, then `deploy/install.sh`.
+  yt-dlp warns that it wants a JavaScript runtime (deno) to solve YouTube's download-speed challenge; it
+  works without one for ordinary videos, and scribe does not enable yt-dlp's downloading of solver
+  scripts from GitHub.
+- The transcript is the speech, transcribed by the model. YouTube's own captions are a different (faster, less
+  accurate) source that scribe does not use.
+- The server's GUI and `POST /api/transcriptions/link` do not take YouTube links: the server does not run yt-dlp.
 
 ## Options of `transcribe`
 
@@ -113,7 +142,7 @@ the message is on stderr either way).
 | --- | --- |
 | 0 | Transcript produced |
 | 2 | Bad usage (SOURCE is neither an existing file nor a link) |
-| 3 | No audio for that link: not a public podcast, Spotify exclusive, no matching episode, unsupported link kind. Retrying will not help. |
+| 3 | No audio for that link: not a public podcast, Spotify exclusive, no matching episode, unsupported link kind; a private, removed, age-restricted or live YouTube video, a YouTube playlist or channel link. Retrying will not help. |
 | 4 | Network or download failure (the link, the feed or the audio host). May be transient. |
 | 5 | The scribe server is unreachable, has no active model, or refused the upload (too large) |
 | 6 | The server failed to transcribe (undecodable audio, internal error) |

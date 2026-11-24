@@ -3,16 +3,18 @@
 import json
 import os
 import socket
+import subprocess
 import threading
 import time
 import types
 import urllib.parse
+from pathlib import Path
 
 import numpy as np
 import pytest
 import uvicorn
 
-from scribe_server import cli, podcast
+from scribe_server import cli, podcast, youtube
 
 from .conftest import Harness, silence, tone, wav
 from .podcast_fakes import FakeFetcher, feed, itunes
@@ -302,3 +304,112 @@ def test_reprocess_fills_the_gaps_of_a_recorded_call(served, capsys):
     assert code == 6 and "no such session" in err
     code, _, err = run(capsys, "recording", new_call(c))
     assert code == 6 and "no recording" in err
+
+
+# -- YouTube (yt-dlp is replaced by a fake: the one place a process starts) ----------------------
+
+VIDEO = "jNQXAC9IVRw"
+VIDEO_INFO = {"id": VIDEO, "title": "Me at the zoo", "channel": "jawed", "upload_date": "20050424", "duration": 19, "webpage_url": f"https://www.youtube.com/watch?v={VIDEO}"}
+
+
+def fake_ytdlp(monkeypatch, info=None, stderr="", code=0, audio=AUDIO):
+    """Stand in for yt-dlp: `--dump-single-json` prints the video's details, a download writes `audio`."""
+    calls = []
+
+    def run(args, timeout):
+        calls.append(args)
+        if code:
+            return subprocess.CompletedProcess(args, code, "", stderr)
+        if "--dump-single-json" in args:
+            return subprocess.CompletedProcess(args, 0, json.dumps(info or VIDEO_INFO), "")
+        target = Path(args[args.index("-o") + 1].replace("%(ext)s", "m4a"))
+        target.write_bytes(audio)
+        return subprocess.CompletedProcess(args, 0, f"{target}\n", "")
+
+    monkeypatch.setattr(youtube, "run_ytdlp", run)
+    return calls
+
+
+@pytest.mark.parametrize("link, found", [
+    (f"https://www.youtube.com/watch?v={VIDEO}", VIDEO),
+    (f"https://www.youtube.com/watch?v={VIDEO}&list=PLabc&t=42s", VIDEO),
+    (f"https://m.youtube.com/watch?v={VIDEO}", VIDEO),
+    (f"https://youtu.be/{VIDEO}?si=xyz", VIDEO),
+    (f"youtu.be/{VIDEO}", VIDEO),
+    (f"https://www.youtube.com/shorts/{VIDEO}", VIDEO),
+    (f"https://www.youtube.com/live/{VIDEO}?feature=share", VIDEO),
+    (f"https://www.youtube.com/embed/{VIDEO}", VIDEO),
+    ("https://www.youtube.com/playlist?list=PLabc", None),
+    ("https://www.youtube.com/@somechannel", None),
+    ("https://www.youtube.com/results?search_query=x", None),
+    ("https://www.youtube.com/watch?v=short", None),
+    ("https://notyoutube.com/watch?v=" + VIDEO, None),
+    ("https://evil.example/youtube.com/watch?v=" + VIDEO, None),
+])
+def test_which_youtube_links_name_one_video(link, found):
+    assert youtube.video_id(link) == found
+
+
+def test_a_youtube_link_is_downloaded_as_audio_and_transcribed(served, tmp_path, monkeypatch, capsys):
+    calls = fake_ytdlp(monkeypatch)
+    link = f"https://youtu.be/{VIDEO}?si=xyz"
+    code, out, err = run(capsys, "transcribe", link, "--format", "json", "--keep-audio", str(tmp_path / "kept"))
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["title"] == "jawed: Me at the zoo" and len(data["segments"]) == 2
+    assert data["episode"]["source"] == "youtube" and data["episode"]["duration_s"] == 19
+    assert data["episode"]["published"].startswith("2005-04-24") and data["episode"]["source_url"] == link
+    assert [p.name for p in (tmp_path / "kept").iterdir()] == ["jawed-Me-at-the-zoo.m4a"]
+    # The canonical address goes to yt-dlp after `--`, never the pasted text, and only audio is asked for.
+    assert all(a[-2:] == ["--", f"https://www.youtube.com/watch?v={VIDEO}"] for a in calls) and len(calls) == 2
+    assert "bestaudio" in calls[1][calls[1].index("-f") + 1]
+
+
+def test_resolve_a_youtube_link_downloads_nothing(monkeypatch, capsys):
+    calls = fake_ytdlp(monkeypatch)
+    code, out, _ = run(capsys, "resolve", f"https://www.youtube.com/watch?v={VIDEO}", "--list")
+    assert code == 0 and [e["title"] for e in json.loads(out)] == ["Me at the zoo"] and len(calls) == 1
+    code, out, _ = run(capsys, "resolve", f"https://www.youtube.com/watch?v={VIDEO}")
+    assert json.loads(out)["show"] == "jawed" and all("--skip-download" in c for c in calls)
+
+
+def test_download_a_youtube_link_saves_the_audio(monkeypatch, tmp_path, capsys):
+    fake_ytdlp(monkeypatch, audio=b"audio")
+    code, out, _ = run(capsys, "download", f"https://www.youtube.com/watch?v={VIDEO}", "--out", str(tmp_path), "-q")
+    assert code == 0 and out.strip() == str(tmp_path / "jawed-Me-at-the-zoo.m4a")
+    assert (tmp_path / "jawed-Me-at-the-zoo.m4a").read_bytes() == b"audio"
+
+
+@pytest.mark.parametrize("stderr, code, hint", [
+    ("ERROR: [youtube] ZZZZZZZZZZZ: Video unavailable. This video is no longer available", 3, "only public"),
+    ("ERROR: [youtube] abc: Private video. Sign in if you've been granted access to this video", 3, "only public"),
+    ("ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate for some users.", 3, "age"),
+    ("ERROR: [youtube] abc: Sign in to confirm you're not a bot", 3, "no YouTube login"),
+    ("ERROR: [youtube] abc: Unable to download webpage: <urlopen error timed out>", 4, ""),
+])
+def test_youtube_failures_say_why_and_use_the_podcast_exit_codes(served, monkeypatch, capsys, stderr, code, hint):
+    fake_ytdlp(monkeypatch, stderr=stderr, code=1)
+    got, out, err = run(capsys, "transcribe", f"https://www.youtube.com/watch?v={VIDEO}", "--format", "json", "-q")
+    assert got == code and hint in err
+    assert json.loads(out)["error"]["exit_code"] == code and "[youtube]" not in err
+
+
+def test_a_playlist_a_channel_and_a_live_stream_are_refused(served, monkeypatch, capsys):
+    calls = fake_ytdlp(monkeypatch)
+    for link in ("https://www.youtube.com/playlist?list=PLabc", "https://www.youtube.com/@somechannel"):
+        code, _, err = run(capsys, "transcribe", link, "-q")
+        assert code == 3 and "not a link to one YouTube video" in err
+    assert calls == []
+    fake_ytdlp(monkeypatch, info={**VIDEO_INFO, "is_live": True})
+    code, _, err = run(capsys, "transcribe", f"https://www.youtube.com/watch?v={VIDEO}", "-q")
+    assert code == 3 and "live stream" in err
+
+
+def test_a_download_that_wrote_nothing_is_a_download_failure(served, monkeypatch, capsys):
+    def run_ytdlp(args, timeout):
+        out = json.dumps(VIDEO_INFO) if "--dump-single-json" in args else ""  # over --max-filesize: exit 0, no file
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(youtube, "run_ytdlp", run_ytdlp)
+    code, _, err = run(capsys, "transcribe", f"https://www.youtube.com/watch?v={VIDEO}", "-q")
+    assert code == 4 and "downloaded no audio" in err
